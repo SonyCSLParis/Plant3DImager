@@ -51,7 +51,7 @@ class SSHManager:
             self.logger.info("[CONNECTION] SSH/SFTP connection established successfully")
             return True
         except Exception as e:
-            self.logger.error("❌ SSH connection error: %s", str(e))
+            self.logger.error("[ERROR] SSH connection error: %s", str(e))
             return False
     
     def exec_romi_command(self, command_args):
@@ -271,7 +271,7 @@ class SSHManager:
         success, _ = self.exec_command(check_cmd)
         
         if success:  # File exists (test -f returns 0 if file exists)
-            self.logger.warning("🔒 Lock file detected: %s", lock_file)
+            self.logger.warning("[LOCK] Lock file detected: %s", lock_file)
             return handle_lock_removal(self)  # Returns "exit_script" or other
         else:
             # No lock, continue
@@ -283,7 +283,7 @@ class SSHManager:
             self.sftp.close()
         if self.ssh:
             self.ssh.close()
-        self.logger.info("🔌 Connections closed")
+        self.logger.info("[CLOSED] Connections closed")
 
 
 def handle_lock_removal(ssh_manager):
@@ -309,17 +309,25 @@ def handle_lock_removal(ssh_manager):
                 
                 if success:
                     print("\n[SUCCESS] Lock successfully removed")
-                    print("[INFO] Please restart the script to continue synchronization.")
-                    print("       Command: python scripts/run_sync.py")
+                    
+                    # Ask if user wants to restart automatically
+                    restart_response = input("\nDo you want to restart the synchronization automatically? (yes/no): ").strip().lower()
+                    if restart_response in ['yes', 'y']:
+                        print("\n[INFO] Restarting synchronization...")
+                        return "restart"
+                    else:
+                        print("\n[INFO] Exiting. You can restart the script manually with:")
+                        print("       Command: python scripts/run_sync.py")
+                        return "exit_script"
                 else:
                     print("\n[ERROR] Unable to remove lock")
                     print("         Check permissions or contact administrator.")
-                return "exit_script"  # Indicate to exit script
+                    return "exit_script"
                 
             elif response in ['no', 'n']:
                 print("\n[STOP] Operation cancelled. Lock not removed.")
                 print("        Synchronization cannot continue while the lock exists.")
-                return "exit_script"  # Exit in this case too
+                return "exit_script"
             else:
                 print("[ERROR] Unrecognized response. Please type 'yes' or 'no'")
                 

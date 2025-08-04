@@ -99,6 +99,8 @@ class ServerSync:
             lock_result = self.ssh.check_and_handle_lock()
             if lock_result == "exit_script":
                 return False
+            elif lock_result == "restart":
+                return "restart"
             elif lock_result != "continue":
                 self.logger.error("[ERROR] Error checking lock")
                 return False
@@ -138,105 +140,124 @@ class ServerSync:
     
     def run_sync(self):
         """Execute the complete synchronization process"""
-        if not self.initialize():
-            return False
+        restart_sync = True
         
-        try:
-            # 1. Run Clean
-            self.logger.info("[CLEANING] Step 1/6: Initial cleaning (Clean)")
-            clean_args = f"Clean {self.remote_work_path} --config {self.romi_config}"
-            result = self.ssh.exec_romi_command(clean_args)
+        while restart_sync:
+            restart_sync = False  # Reset flag to avoid infinite loop
             
-            if result == "lock_detected":
-                self.logger.warning("[LOCK] Database lock detected during Clean")
-                lock_result = handle_lock_removal(self.ssh)
-                if lock_result == "exit_script":
-                    return False
-            elif not result:
-                self.logger.error("[ERROR] Clean task failed")
+            init_result = self.initialize()
+            if init_result == "restart":
+                restart_sync = True
+                continue
+            elif not init_result:
                 return False
             
-            # 2. Delete old files from server
-            self.logger.info("[DELETION] Step 2/6: Deleting old files")
-            items_to_remove = ["images", "metadata", "files.json", "scan.toml"]
-            for item in items_to_remove:
-                cmd = f"rm -rf '{self.remote_work_path}{item}'"
-                success, _ = self.ssh.exec_command(cmd)
-                if not success:
-                    self.logger.warning("[WARNING] Unable to delete %s (may be absent)", item)
-            
-            # 3. Find latest local acquisition
-            self.logger.info("[SEARCH] Step 3/6: Finding latest acquisition")
-            latest_dir, timestamp = self.find_latest_acquisition()
-            if not latest_dir:
-                return False
-            
-            # 4. Copy new files to server
-            self.logger.info("[UPLOAD] Step 4/6: Uploading new data")
-            items_to_copy = ["images", "metadata", "files.json", "scan.toml"]
-            
-            for item in items_to_copy:
-                src_path = latest_dir / item
-                dst_path = f"{self.remote_work_path}{item}"
+            try:
+                # 1. Run Clean
+                self.logger.info("[CLEANING] Step 1/6: Initial cleaning (Clean)")
+                clean_args = f"Clean {self.remote_work_path} --config {self.romi_config}"
+                result = self.ssh.exec_romi_command(clean_args)
                 
-                if not src_path.exists():
-                    self.logger.warning("[WARNING] Missing item (skipped): %s", src_path)
-                    continue
+                if result == "lock_detected":
+                    self.logger.warning("[LOCK] Database lock detected during Clean")
+                    lock_result = handle_lock_removal(self.ssh)
+                    if lock_result == "exit_script":
+                        return False
+                    elif lock_result == "restart":
+                        restart_sync = True
+                        self.ssh.close()
+                        self.initialized = False
+                        continue  # Restart the loop
+                elif not result:
+                    self.logger.error("[ERROR] Clean task failed")
+                    return False
                 
-                self.logger.info("[UPLOAD] Copying: %s", item)
-                if not self.ssh.upload_path(src_path, dst_path):
-                    self.logger.error("[ERROR] Failed to copy %s", item)
+                # 2. Delete old files from server
+                self.logger.info("[DELETION] Step 2/6: Deleting old files")
+                items_to_remove = ["images", "metadata", "files.json", "scan.toml"]
+                for item in items_to_remove:
+                    cmd = f"rm -rf '{self.remote_work_path}{item}'"
+                    success, _ = self.ssh.exec_command(cmd)
+                    if not success:
+                        self.logger.warning("[WARNING] Unable to delete %s (may be absent)", item)
+                
+                # 3. Find latest local acquisition
+                self.logger.info("[SEARCH] Step 3/6: Finding latest acquisition")
+                latest_dir, timestamp = self.find_latest_acquisition()
+                if not latest_dir:
                     return False
-            
-            # 5. Run PointCloud
-            self.logger.info("[PROCESSING] Step 5/6: Generating point cloud (PointCloud)")
-            pointcloud_args = f"PointCloud {self.remote_work_path} --config {self.romi_config}"
-            result = self.ssh.exec_romi_command(pointcloud_args)
-            
-            if result == "lock_detected":
-                self.logger.warning("[LOCK] Database lock detected during PointCloud")
-                lock_result = handle_lock_removal(self.ssh)
-                if lock_result == "exit_script":
+                
+                # 4. Copy new files to server
+                self.logger.info("[UPLOAD] Step 4/6: Uploading new data")
+                items_to_copy = ["images", "metadata", "files.json", "scan.toml"]
+                
+                for item in items_to_copy:
+                    src_path = latest_dir / item
+                    dst_path = f"{self.remote_work_path}{item}"
+                    
+                    if not src_path.exists():
+                        self.logger.warning("[WARNING] Missing item (skipped): %s", src_path)
+                        continue
+                    
+                    self.logger.info("[UPLOAD] Copying: %s", item)
+                    if not self.ssh.upload_path(src_path, dst_path):
+                        self.logger.error("[ERROR] Failed to copy %s", item)
+                        return False
+                
+                # 5. Run PointCloud
+                self.logger.info("[PROCESSING] Step 5/6: Generating point cloud (PointCloud)")
+                pointcloud_args = f"PointCloud {self.remote_work_path} --config {self.romi_config}"
+                result = self.ssh.exec_romi_command(pointcloud_args)
+                
+                if result == "lock_detected":
+                    self.logger.warning("[LOCK] Database lock detected during PointCloud")
+                    lock_result = handle_lock_removal(self.ssh)
+                    if lock_result == "exit_script":
+                        return False
+                    elif lock_result == "restart":
+                        restart_sync = True
+                        self.ssh.close()
+                        self.initialized = False
+                        continue  # Restart the loop
+                elif not result:
+                    self.logger.error("[ERROR] PointCloud task failed")
                     return False
-            elif not result:
-                self.logger.error("[ERROR] PointCloud task failed")
-                return False
-            
-            # 6. Retrieve PLY file
-            self.logger.info("[DOWNLOAD] Step 6/6: Retrieving point cloud")
-            
-            # Find PointCloud* directory
-            find_cmd = f"find '{self.remote_work_path}' -name 'PointCloud*' -type d | head -1"
-            success, pointcloud_dir = self.ssh.exec_command(find_cmd)
-            
-            if not success or not pointcloud_dir:
-                self.logger.error("[ERROR] Unable to find PointCloud directory")
-                return False
-            
-            # Download PLY file
-            remote_ply = f"{pointcloud_dir.strip()}/PointCloud.ply"
-            local_ply = f"{self.local_ply_target}/PointCloud_{timestamp}.ply"
-            
-            if not self.ssh.download_file(remote_ply, local_ply):
-                self.logger.error("[ERROR] Failed to download PLY")
-                return False
-            
-            self.logger.info("[SUCCESS] PLY file retrieved: %s", local_ply)
-            
-            # 7. Clean closure
-            self.ssh.close()
-            self.logger.info("[FINISHED] Synchronization completed successfully")
-            return True
-            
-        except KeyboardInterrupt:
-            self.logger.info("[STOP] User interruption")
-            return False
-        except Exception as e:
-            self.logger.error("[ERROR] Unexpected error: %s", str(e), exc_info=True)
-            return False
-        finally:
-            if self.ssh:
+                
+                # 6. Retrieve PLY file
+                self.logger.info("[DOWNLOAD] Step 6/6: Retrieving point cloud")
+                
+                # Find PointCloud* directory
+                find_cmd = f"find '{self.remote_work_path}' -name 'PointCloud*' -type d | head -1"
+                success, pointcloud_dir = self.ssh.exec_command(find_cmd)
+                
+                if not success or not pointcloud_dir:
+                    self.logger.error("[ERROR] Unable to find PointCloud directory")
+                    return False
+                
+                # Download PLY file
+                remote_ply = f"{pointcloud_dir.strip()}/PointCloud.ply"
+                local_ply = f"{self.local_ply_target}/PointCloud_{timestamp}.ply"
+                
+                if not self.ssh.download_file(remote_ply, local_ply):
+                    self.logger.error("[ERROR] Failed to download PLY")
+                    return False
+                
+                self.logger.info("[SUCCESS] PLY file retrieved: %s", local_ply)
+                
+                # 7. Clean closure
                 self.ssh.close()
+                self.logger.info("[FINISHED] Synchronization completed successfully")
+                return True
+                
+            except KeyboardInterrupt:
+                self.logger.info("[STOP] User interruption")
+                return False
+            except Exception as e:
+                self.logger.error("[ERROR] Unexpected error: %s", str(e), exc_info=True)
+                return False
+            finally:
+                if not restart_sync and self.ssh:  # Only close if not restarting
+                    self.ssh.close()
     
     def shutdown(self):
         """Properly close connection"""
