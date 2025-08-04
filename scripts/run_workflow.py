@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Script pour exécuter le workflow complet d'acquisition, synchronisation et ciblage
+Script to execute complete workflow of acquisition, synchronization and targeting
 """
 
 import os
@@ -12,10 +12,10 @@ import time
 import logging
 from datetime import datetime
 
-# Ajouter le répertoire parent au chemin de recherche Python
+# Add parent directory to Python search path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-# Importer les modules nécessaires
+# Import required modules
 from acquisition.circle_acquisition import CircleAcquisition
 from sync.server_sync import ServerSync
 from targeting.leaf_targeting import LeafTargeting
@@ -24,12 +24,12 @@ from core.utils import config
 class WorkflowManager:
     def __init__(self, args):
         """
-        Initialise le gestionnaire de workflow
+        Initialize workflow manager
         
         Args:
-            args: Arguments de la ligne de commande
+            args: Command line arguments
         """
-        # Configuration du logging
+        # Logging configuration
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s',
@@ -37,123 +37,123 @@ class WorkflowManager:
         )
         self.logger = logging.getLogger("workflow")
         
-        # Stockage des arguments
+        # Store arguments
         self.args = args
         
-        # Résultats de chaque étape
+        # Results of each step
         self.acquisition_result = None
         self.sync_result = None
         self.targeting_result = None
         
-        # Chemins des données
+        # Data paths
         self.latest_acquisition_dir = None
         self.latest_ply_path = None
         
-        # États pour le suivi du workflow
+        # Workflow tracking states
         self.acquisition_completed = False
         self.sync_completed = False
         self.targeting_completed = False
     
     def run_acquisition(self):
-        """Exécute l'étape d'acquisition d'images"""
-        self.logger.info("=== ÉTAPE 1: ACQUISITION D'IMAGES ===")
+        """Execute image acquisition step"""
+        self.logger.info("=== STEP 1: IMAGE ACQUISITION ===")
         
-        # Vérifier si on doit sauter cette étape
+        # Check if we should skip this step
         if self.args.skip_acquisition:
-            self.logger.info("Étape d'acquisition ignorée (--skip-acquisition)")
+            self.logger.info("Acquisition step skipped (--skip-acquisition)")
             self.acquisition_completed = True
             return True
         
         try:
-            # Créer et initialiser l'acquisition
+            # Create and initialize acquisition
             acquisition = CircleAcquisition(self.args)
             
-            # Exécuter l'acquisition
-            self.logger.info("Démarrage de l'acquisition d'images...")
+            # Run acquisition
+            self.logger.info("Starting image acquisition...")
             self.acquisition_result = acquisition.run_acquisition()
             
             if not self.acquisition_result:
-                self.logger.error("L'acquisition a échoué")
+                self.logger.error("Acquisition failed")
                 return False
             
-            self.logger.info("Acquisition d'images terminée avec succès")
+            self.logger.info("Image acquisition completed successfully")
             self.acquisition_completed = True
             return True
             
         except Exception as e:
-            self.logger.error(f"Erreur pendant l'acquisition: {e}")
+            self.logger.error(f"Error during acquisition: {e}")
             import traceback
             traceback.print_exc()
             return False
     
     def run_sync(self):
-        """Exécute l'étape de synchronisation avec le serveur"""
-        self.logger.info("\n=== ÉTAPE 2: SYNCHRONISATION AVEC LE SERVEUR ===")
+        """Execute server synchronization step"""
+        self.logger.info("\n=== STEP 2: SERVER SYNCHRONIZATION ===")
         
-        # Vérifier si on doit sauter cette étape
+        # Check if we should skip this step
         if self.args.skip_sync:
-            self.logger.info("Étape de synchronisation ignorée (--skip-sync)")
+            self.logger.info("Synchronization step skipped (--skip-sync)")
             
-            # Si on saute la synchro, on doit quand même définir le chemin du PLY
+            # If we skip sync, we still need to set PLY path
             if self.args.point_cloud:
                 self.latest_ply_path = self.args.point_cloud
-                self.logger.info(f"Utilisation du nuage de points spécifié: {self.latest_ply_path}")
+                self.logger.info(f"Using specified point cloud: {self.latest_ply_path}")
                 self.sync_completed = True
                 return True
             else:
-                self.logger.error("Aucun nuage de points spécifié avec --point-cloud alors que --skip-sync est activé")
+                self.logger.error("No point cloud specified with --point-cloud while --skip-sync is enabled")
                 return False
         
         try:
-            # Créer et initialiser la synchronisation
+            # Create and initialize synchronization
             sync = ServerSync(self.args)
             
-            # Exécuter la synchronisation
-            self.logger.info("Démarrage de la synchronisation...")
+            # Run synchronization
+            self.logger.info("Starting synchronization...")
             self.sync_result = sync.run_sync()
             
             if not self.sync_result:
-                self.logger.error("La synchronisation a échoué")
+                self.logger.error("Synchronization failed")
                 return False
             
-            # Obtenir le chemin du dernier PLY
+            # Get latest PLY path
             self.latest_ply_path = self._find_latest_ply()
             
             if not self.latest_ply_path:
-                self.logger.error("Impossible de trouver le nuage de points généré")
+                self.logger.error("Unable to find generated point cloud")
                 return False
             
-            self.logger.info(f"Nuage de points trouvé: {self.latest_ply_path}")
+            self.logger.info(f"Point cloud found: {self.latest_ply_path}")
             self.sync_completed = True
             return True
             
         except Exception as e:
-            self.logger.error(f"Erreur pendant la synchronisation: {e}")
+            self.logger.error(f"Error during synchronization: {e}")
             import traceback
             traceback.print_exc()
             return False
     
     def run_targeting(self):
-        """Exécute l'étape de ciblage des feuilles"""
-        self.logger.info("\n=== ÉTAPE 3: CIBLAGE DES FEUILLES ===")
+        """Execute leaf targeting step"""
+        self.logger.info("\n=== STEP 3: LEAF TARGETING ===")
         
-        # Vérifier si on doit sauter cette étape
+        # Check if we should skip this step
         if self.args.skip_targeting:
-            self.logger.info("Étape de ciblage ignorée (--skip-targeting)")
+            self.logger.info("Targeting step skipped (--skip-targeting)")
             self.targeting_completed = True
             return True
         
-        # Vérifier qu'on a bien un fichier PLY
+        # Check that we have a PLY file
         if not self.latest_ply_path:
             if self.args.point_cloud:
                 self.latest_ply_path = self.args.point_cloud
-                self.logger.info(f"Utilisation du nuage de points spécifié: {self.latest_ply_path}")
+                self.logger.info(f"Using specified point cloud: {self.latest_ply_path}")
             else:
-                self.logger.error("Aucun nuage de points disponible pour le ciblage")
+                self.logger.error("No point cloud available for targeting")
                 return False
         
         try:
-            # Créer un dictionnaire d'arguments pour le targeting
+            # Create argument dictionary for targeting
             targeting_args = argparse.Namespace(
                 point_cloud=self.latest_ply_path,
                 scale=self.args.scale,
@@ -168,175 +168,175 @@ class WorkflowManager:
                 distance=self.args.distance
             )
             
-            # Créer et initialiser le ciblage
+            # Create and initialize targeting
             targeting = LeafTargeting(targeting_args)
             
-            # Exécuter le ciblage
-            self.logger.info("Démarrage du ciblage des feuilles...")
+            # Run targeting
+            self.logger.info("Starting leaf targeting...")
             self.targeting_result = targeting.run_targeting()
             
             if not self.targeting_result:
-                self.logger.error("Le ciblage a échoué")
+                self.logger.error("Targeting failed")
                 return False
             
-            self.logger.info("Ciblage des feuilles terminé avec succès")
+            self.logger.info("Leaf targeting completed successfully")
             self.targeting_completed = True
             return True
             
         except Exception as e:
-            self.logger.error(f"Erreur pendant le ciblage: {e}")
+            self.logger.error(f"Error during targeting: {e}")
             import traceback
             traceback.print_exc()
             return False
     
     def _find_latest_ply(self):
-        """Trouve le dernier fichier PLY dans le répertoire des nuages de points"""
+        """Find latest PLY file in point clouds directory"""
         ply_dir = config.LOCAL_PLY_TARGET
         
         if not os.path.exists(ply_dir):
-            self.logger.error(f"Répertoire de nuages de points introuvable: {ply_dir}")
+            self.logger.error(f"Point clouds directory not found: {ply_dir}")
             return None
         
-        # Trouver tous les fichiers PLY
+        # Find all PLY files
         ply_files = [f for f in os.listdir(ply_dir) if f.lower().endswith('.ply')]
         
         if not ply_files:
-            self.logger.error(f"Aucun fichier PLY trouvé dans {ply_dir}")
+            self.logger.error(f"No PLY files found in {ply_dir}")
             return None
         
-        # Trier par date de modification (le plus récent en premier)
+        # Sort by modification date (newest first)
         ply_files.sort(key=lambda f: os.path.getmtime(os.path.join(ply_dir, f)), reverse=True)
         
-        # Retourner le chemin complet du fichier le plus récent
+        # Return full path of most recent file
         latest_ply = os.path.join(ply_dir, ply_files[0])
         return latest_ply
     
     def run_workflow(self):
-        """Exécute le workflow complet"""
+        """Execute complete workflow"""
         start_time = time.time()
-        self.logger.info("=== DÉMARRAGE DU WORKFLOW COMPLET ===")
+        self.logger.info("=== STARTING COMPLETE WORKFLOW ===")
         
-        # Étape 1: Acquisition
+        # Step 1: Acquisition
         if not self.run_acquisition():
-            self.logger.error("Le workflow a été interrompu à l'étape d'acquisition")
+            self.logger.error("Workflow interrupted at acquisition step")
             return False
         
-        # Étape 2: Synchronisation
+        # Step 2: Synchronization
         if not self.run_sync():
-            self.logger.error("Le workflow a été interrompu à l'étape de synchronisation")
+            self.logger.error("Workflow interrupted at synchronization step")
             return False
         
-        # Étape 3: Ciblage
+        # Step 3: Targeting
         if not self.run_targeting():
-            self.logger.error("Le workflow a été interrompu à l'étape de ciblage")
+            self.logger.error("Workflow interrupted at targeting step")
             return False
         
-        # Workflow complet terminé
+        # Complete workflow finished
         elapsed_time = time.time() - start_time
         hours, remainder = divmod(elapsed_time, 3600)
         minutes, seconds = divmod(remainder, 60)
         
-        self.logger.info("\n=== WORKFLOW COMPLET TERMINÉ AVEC SUCCÈS ===")
-        self.logger.info(f"Temps total: {int(hours):02}h {int(minutes):02}m {int(seconds):02}s")
+        self.logger.info("\n=== COMPLETE WORKFLOW FINISHED SUCCESSFULLY ===")
+        self.logger.info(f"Total time: {int(hours):02}h {int(minutes):02}m {int(seconds):02}s")
         
         return True
 
 def parse_arguments():
-    """Parse les arguments de la ligne de commande"""
-    parser = argparse.ArgumentParser(description="Workflow complet d'acquisition, synchronisation et ciblage")
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(description="Complete workflow for acquisition, synchronization and targeting")
     
-    # Options générales du workflow
-    workflow_group = parser.add_argument_group('Options du workflow')
+    # General workflow options
+    workflow_group = parser.add_argument_group('Workflow options')
     workflow_group.add_argument("--skip-acquisition", action="store_true", 
-                             help="Sauter l'étape d'acquisition")
+                             help="Skip acquisition step")
     workflow_group.add_argument("--skip-sync", action="store_true", 
-                             help="Sauter l'étape de synchronisation")
+                             help="Skip synchronization step")
     workflow_group.add_argument("--skip-targeting", action="store_true", 
-                             help="Sauter l'étape de ciblage")
+                             help="Skip targeting step")
     workflow_group.add_argument("--point-cloud", type=str, 
-                             help="Chemin vers un nuage de points existant (si --skip-sync)")
+                             help="Path to existing point cloud (if --skip-sync)")
     
-    # Options d'acquisition
-    acq_group = parser.add_argument_group('Options d\'acquisition')
+    # Acquisition options
+    acq_group = parser.add_argument_group('Acquisition options')
     acq_group.add_argument("--circles", "-c", type=int, choices=[1, 2], default=1,
-                      help=f"Nombre de cercles à photographier (1 ou 2, défaut: 1)")
+                      help=f"Number of circles to photograph (1 or 2, default: 1)")
     
     acq_group.add_argument("--positions", "-p", type=int, default=config.NUM_POSITIONS, 
-                      help=f"Nombre de positions par cercle (défaut: {config.NUM_POSITIONS})")
+                      help=f"Number of positions per circle (default: {config.NUM_POSITIONS})")
     
     acq_group.add_argument("--radius", "-r", type=float, default=config.CIRCLE_RADIUS,
-                      help=f"Rayon du cercle en mètres (défaut: {config.CIRCLE_RADIUS})")
+                      help=f"Circle radius in meters (default: {config.CIRCLE_RADIUS})")
     
     acq_group.add_argument("--z-offset", "-z", type=float, default=config.Z_OFFSET,
-                      help=f"Décalage en Z entre les deux cercles en mètres (défaut: {config.Z_OFFSET})")
+                      help=f"Z offset between two circles in meters (default: {config.Z_OFFSET})")
     
-    # Options de ciblage
-    target_group = parser.add_argument_group('Options de ciblage')
+    # Targeting options
+    target_group = parser.add_argument_group('Targeting options')
     target_group.add_argument("--scale", type=float, default=0.001, 
-                         help="Facteur d'échelle pour le nuage de points (défaut: 0.001 = mm->m)")
+                         help="Scale factor for point cloud (default: 0.001 = mm->m)")
     
     target_group.add_argument("--alpha", type=float, default=0.1, 
-                         help="Valeur alpha pour Alpha Shape (défaut: 0.1)")
+                         help="Alpha value for Alpha Shape (default: 0.1)")
     
     target_group.add_argument("--crop_method", choices=['none', 'top_percentage', 'single_furthest'], 
-                         default='none', help="Méthode de cropping (défaut: none)")
+                         default='none', help="Cropping method (default: none)")
     
     target_group.add_argument("--crop_percentage", type=float, default=0.25, 
-                         help="Pourcentage pour top_percentage (défaut: 0.25)")
+                         help="Percentage for top_percentage (default: 0.25)")
     
     target_group.add_argument("--louvain_coeff", type=float, default=0.5, 
-                         help="Coefficient pour la détection Louvain (défaut: 0.5)")
+                         help="Coefficient for Louvain detection (default: 0.5)")
     
     target_group.add_argument("--distance", type=float, default=0.4, 
-                         help="Distance aux feuilles cibles en mètres (défaut: 0.4 m)")
+                         help="Distance to target leaves in meters (default: 0.4 m)")
     
     target_group.add_argument("--simulate", action="store_true", 
-                         help="Mode simulation (sans contrôle robot)")
+                         help="Simulation mode (no robot control)")
     
     target_group.add_argument("--auto_photo", action="store_true", 
-                         help="Prendre automatiquement des photos à chaque cible")
+                         help="Take photos automatically at each target")
     
-    # Options matérielles
-    hw_group = parser.add_argument_group('Options matérielles')
+    # Hardware options
+    hw_group = parser.add_argument_group('Hardware options')
     hw_group.add_argument("--arduino-port", "-a", type=str, default=config.ARDUINO_PORT,
-                      help=f"Port Arduino (défaut: {config.ARDUINO_PORT})")
+                      help=f"Arduino port (default: {config.ARDUINO_PORT})")
     
     hw_group.add_argument("--speed", "-s", type=float, default=config.CNC_SPEED,
-                      help=f"Vitesse de déplacement de la CNC en m/s (défaut: {config.CNC_SPEED})")
+                      help=f"CNC movement speed in m/s (default: {config.CNC_SPEED})")
     
-    # Options de synchronisation
-    sync_group = parser.add_argument_group('Options de synchronisation')
+    # Synchronization options
+    sync_group = parser.add_argument_group('Synchronization options')
     sync_group.add_argument("--ssh-host", type=str, default=config.SSH_HOST,
-                       help=f"Adresse du serveur SSH (défaut: {config.SSH_HOST})")
+                       help=f"SSH server address (default: {config.SSH_HOST})")
     
     sync_group.add_argument("--ssh-user", type=str, default=config.SSH_USER,
-                       help=f"Nom d'utilisateur SSH (défaut: {config.SSH_USER})")
+                       help=f"SSH username (default: {config.SSH_USER})")
     
     sync_group.add_argument("--key-path", type=str, default=config.KEY_PATH,
-                       help=f"Chemin vers la clé SSH (défaut: {config.KEY_PATH})")
+                       help=f"Path to SSH key (default: {config.KEY_PATH})")
     
     sync_group.add_argument("--remote-path", type=str, default=config.REMOTE_WORK_PATH,
-                       help=f"Chemin du répertoire de travail distant (défaut: {config.REMOTE_WORK_PATH})")
+                       help=f"Remote working directory path (default: {config.REMOTE_WORK_PATH})")
     
     sync_group.add_argument("--local-acq", type=str, default=config.LOCAL_ACQUISITION_BASE,
-                       help=f"Répertoire d'acquisition local (défaut: {config.LOCAL_ACQUISITION_BASE})")
+                       help=f"Local acquisition directory (default: {config.LOCAL_ACQUISITION_BASE})")
     
     sync_group.add_argument("--ply-target", type=str, default=config.LOCAL_PLY_TARGET,
-                       help=f"Répertoire cible pour les fichiers PLY (défaut: {config.LOCAL_PLY_TARGET})")
+                       help=f"Target directory for PLY files (default: {config.LOCAL_PLY_TARGET})")
     
     sync_group.add_argument("--dry-run", action="store_true",
-                       help="Mode simulation pour la synchronisation (pas d'exécution réelle)")
+                       help="Simulation mode for synchronization (no actual execution)")
     
     return parser.parse_args()
 
 def main():
-    """Fonction principale"""
-    print("=== Workflow Complet: Acquisition, Synchronisation et Ciblage ===")
+    """Main function"""
+    print("=== Complete Workflow: Acquisition, Synchronization and Targeting ===")
     
-    # Parser les arguments
+    # Parse arguments
     args = parse_arguments()
     
-    # Créer et exécuter le workflow
+    # Create and run workflow
     workflow = WorkflowManager(args)
     success = workflow.run_workflow()
     

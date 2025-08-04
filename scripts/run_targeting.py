@@ -2,27 +2,27 @@
 # -*- coding: utf-8 -*-
 
 """
-Script pour exécuter le ciblage de feuilles
+Script to execute leaf targeting
 """
 
 import os
 import sys
 import argparse
 
-# Ajouter le répertoire parent au chemin de recherche Python
+# Add parent directory to Python search path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-# Importer la classe LeafTargeting refactorisée
+# Import refactored LeafTargeting class
 from targeting.leaf_targeting import LeafTargeting, parse_arguments
 
 def main():
-    """Fonction principale"""
-    print("=== Système de ciblage de feuilles ===")
+    """Main function"""
+    print("=== Leaf Targeting System ===")
     
-    # Parser les arguments
+    # Parse arguments
     args = parse_arguments()
     
-    # Créer et exécuter le ciblage
+    # Create and run targeting
     targeting = LeafTargeting(args)
     success = targeting.run_targeting()
     
