@@ -1,130 +1,130 @@
-# Configuration Documentation
+# Plant Imaging and Leaf Targeting System
 
-This document describes the parameters available in the `config.json` file and their effects on the system.
+A modular robotic system for plant phenotyping that performs circular image acquisition and precise targeting of individual leaves.
 
-## General Parameters
+![System Overview](https://example.com/system_overview.png) <!-- You can add a system image here -->
 
-| Parameter | Description | Default Value | Unit |
-|-----------|-------------|---------------|------|
-| `TARGET_POINT` | Target point for camera orientation | [0.375, 0.35, 0.30] | m |
-| `CENTER_POINT` | Center of acquisition circle | [0.375, 0.35, 0.00] | m |
-| `CIRCLE_RADIUS` | Radius of acquisition circle | 0.30 | m |
-| `NUM_POSITIONS` | Number of positions on the circle | 80 | - |
-| `Z_OFFSET` | Z offset between two circles | 0.20 | m |
+## Key Features
 
-## Hardware Parameters
+- **Circular Image Acquisition**: Capture images around plants along one or two circular paths with precise camera orientation
+- **Automated Leaf Targeting**: Identify and photograph individual leaves using 3D point cloud analysis
+- **Interactive Leaf Selection**: Visualize and select specific leaves for detailed imaging
+- **Manual Robot Control**: Fine-grained positioning for custom imaging tasks
+- **Server Integration**: Automatic synchronization with a server for 3D reconstruction via the ROMI Plant-3D-Vision pipeline
 
-| Parameter | Description | Default Value | Unit |
-|-----------|-------------|---------------|------|
-| `ARDUINO_PORT` | Arduino serial port for gimbal | "/dev/ttyACM0" | - |
-| `CNC_SPEED` | CNC movement speed | 0.1 | m/s |
-| `UPDATE_INTERVAL` | Update interval during movement | 0.1 | s |
-| `STABILIZATION_TIME` | Stabilization time before photo | 3.0 | s |
+## System Architecture
 
-## Storage Parameters
-
-| Parameter | Description | Default Value |
-|-----------|-------------|---------------|
-| `RESULTS_DIR` | Main directory for results | "results" |
-| `ACQUISITION_DIR` | Subdirectory for acquisition | "plant_acquisition" |
-| `TARGETING_DIR` | Subdirectory for targeting | "leaf_targeting" |
-
-## Synchronization Parameters
-
-| Parameter | Description | Default Value |
-|-----------|-------------|---------------|
-| `SSH_HOST` | SSH server address | "10.0.7.22" |
-| `SSH_USER` | SSH username | "ayman" |
-| `KEY_PATH` | Path to SSH key | "/home/romi/.ssh/id_rsa" |
-| `REMOTE_WORK_PATH` | Remote working directory path | "/mnt/diskSustainability/Scanner_Data/scanner_lyon/3dt_colA/Col_A_2021-01-29/" |
-| `LOCAL_ACQUISITION_BASE` | Local acquisition directory | "results/plant_acquisition" |
-| `LOCAL_PLY_TARGET` | Target directory for PLY files | "results/pointclouds" |
-| `ROMI_CONFIG` | Path to ROMI Plant-3D-Vision pipeline configuration file | "~/plant-3d-vision/configs/geom_pipe_real.toml" | - |
-
-## Example Configuration
-
-Below is an example of a complete `config.json` file:
-
-```json
-{
-    "TARGET_POINT": [0.375, 0.35, 0.30],
-    "CENTER_POINT": [0.375, 0.35, 0.00],
-    "CIRCLE_RADIUS": 0.30,
-    "NUM_POSITIONS": 80,
-    "Z_OFFSET": 0.20,
-    "ARDUINO_PORT": "/dev/ttyACM0",
-    "CNC_SPEED": 0.1,
-    "UPDATE_INTERVAL": 0.1,
-    "STABILIZATION_TIME": 3.0,
-    "RESULTS_DIR": "results",
-    "ACQUISITION_DIR": "plant_acquisition",
-    "TARGETING_DIR": "leaf_targeting",
-    "SSH_HOST": "10.0.7.22",
-    "SSH_USER": "ayman",
-    "KEY_PATH": "/home/romi/.ssh/id_rsa",
-    "REMOTE_WORK_PATH": "/mnt/diskSustainability/Scanner_Data/scanner_lyon/3dt_colA/Col_A_2021-01-29/",
-    "LOCAL_ACQUISITION_BASE": "results/plant_acquisition",
-    "LOCAL_PLY_TARGET": "results/pointclouds",
-    "ROMI_CONFIG": "~/plant-3d-vision/configs/geom_pipe_real.toml"
-}
+```
+┌───────────────────────────────────────────┐
+│                 CORE                      │
+│  ┌────────────┐  ┌────────────┐           │
+│  │  Hardware  │  │  Geometry  │           │
+│  └────────────┘  └────────────┘           │
+│  ┌────────────┐  ┌────────────┐           │
+│  │  Data      │  │  Utils     │           │
+│  └────────────┘  └────────────┘           │
+└─┬─────────────┬──────────┬────────────┬───┘
+  │             │          │            │
+  ▼             ▼          ▼            ▼
+┌──────────┐ ┌────────┐ ┌────────┐ ┌─────────┐
+│  IMAGE   │ │ SERVER │ │  LEAF  │ │ MANUAL  │
+│ACQUISITION│→│  SYNC  │→│TARGETING│ │ CONTROL │
+└──────────┘ └────────┘ └────────┘ └─────────┘
+    Data Flow ────────────────→    Independent
 ```
 
-## ROMI Configuration
+For detailed architecture information, see the [architecture documentation](doc/architecture.md).
 
-The `ROMI_CONFIG` parameter points to a [Plant-3D-Vision](https://github.com/romi/plant-3d-vision) configuration file that defines the 3D reconstruction pipeline. This TOML file controls how the plant point cloud is generated from the acquired images.
+## Installation
 
-Important Plant-3D-Vision settings:
+### Prerequisites
 
-- `Colmap`: Settings for Structure from Motion
-- `PointCloud`: Settings for point cloud generation
-- `Voxels`: Settings for voxelization
-- `TreeGraph`: Settings for skeletonization
+- Python 3.7+
+- Required libraries: open3d, numpy, scipy, matplotlib, paramiko, networkx
+- Arduino setup for gimbal control
+- [ROMI framework](https://github.com/romi/romi-apps) for hardware interfacing
+- [Plant-3D-Vision](https://github.com/romi/plant-3d-vision) for 3D reconstruction
 
-For detailed documentation on these settings, refer to the [Plant-3D-Vision repository](https://github.com/romi/plant-3d-vision).
+### Quick Setup
 
-## Recommendations
+1. Clone the repository:
+```bash
+git clone https://github.com/your-username/plant-imaging-system.git
+cd plant-imaging-system
+```
 
-### Image Acquisition
+2. Install dependencies:
+```bash
+pip install -r requirements.txt
+```
 
-- For large plants: `CIRCLE_RADIUS` = 0.4-0.5 m
-- For small plants: `CIRCLE_RADIUS` = 0.2-0.3 m
-- Recommended number of positions: 60-120 depending on plant complexity
-- Two circles recommended for plants with complex structures
+3. Configure system parameters in `config.json`
+
+## Usage
+
+### Circular Image Acquisition
+
+```bash
+# Acquire images around a plant with 80 positions on a single circle
+python main.py --mode acquisition --circles 1 --positions 80
+
+# Acquire images with two circles at different heights
+python main.py --mode acquisition --circles 2 --positions 60 --z-offset 0.2
+```
 
 ### Leaf Targeting
 
-- Recommended distance to leaves: 0.3-0.5 m
-- Louvain coefficient: 0.3-0.7 (lower values = more communities detected)
-- Scale factor should match your point cloud's original units (typically 0.001 for mm → m)
+```bash
+# Process a point cloud and target individual leaves
+python main.py --mode targeting --point_cloud path/to/PointCloud.ply
 
-### Hardware Settings
-
-- `STABILIZATION_TIME`: Increase to 5.0s for higher quality photos
-- `CNC_SPEED`: Reduce to 0.05 m/s for more stable movements
-- `UPDATE_INTERVAL`: Reduce to 0.05s for more responsive feedback during manual control
-
-## Environment-Specific Configurations
-
-For different environments or use cases, you might want to adjust your configuration. Here are some examples:
-
-### Laboratory Setup
-
-```json
-{
-    "CIRCLE_RADIUS": 0.25,
-    "NUM_POSITIONS": 100,
-    "CNC_SPEED": 0.05,
-    "STABILIZATION_TIME": 5.0
-}
+# With custom parameters
+python main.py --mode targeting --point_cloud path/to/PointCloud.ply --scale 0.001 --louvain_coeff 0.5 --distance 0.4
 ```
 
-### Field Setup
+### Manual Control
 
-```json
-{
-    "CIRCLE_RADIUS": 0.40,
-    "NUM_POSITIONS": 60,
-    "CNC_SPEED": 0.1,
-    "STABILIZATION_TIME": 2.0
-}
+```bash
+# Start manual control mode
+python main.py --mode manual
+
+# Command format: x y z [pan] [tilt] [photo]
+# Example commands:
+# 0.3 0.4 0.2           # Move to position
+# 0.3 0.4 0.2 45 30     # Move and orient camera
+# 0.3 0.4 0.2 45 30 1   # Move, orient, and take photo
 ```
+
+### Complete Workflow
+
+```bash
+# Run the full workflow: acquisition → synchronization → targeting
+python main.py --mode workflow
+
+# Skip specific steps if needed
+python main.py --mode workflow --skip-acquisition --point-cloud path/to/existing.ply
+```
+
+## Documentation
+
+- [User Guide](doc/user_guide.md) - Detailed usage instructions
+- [Configuration Guide](doc/configuration.md) - Configuration parameters reference
+- [Architecture](doc/architecture.md) - System architecture and technical details
+
+## Project Structure
+
+- `acquisition/` - Circular image acquisition
+- `targeting/` - Leaf targeting and analysis
+- `manual_control/` - Manual control system
+- `sync/` - Server synchronization
+- `core/` - Shared components (hardware, geometry, data, utils)
+- `scripts/` - Execution scripts
+- `results/` - Results storage
+
+## License
+
+[MIT License](LICENSE)
+
+## Acknowledgments
+
+This project builds upon the [ROMI (RObotics for MIcrofarms)](https://github.com/romi/romi-apps) framework and [Plant-3D-Vision](https://github.com/romi/plant-3d-vision) pipeline.
