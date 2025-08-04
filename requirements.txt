@@ -1,0 +1,13 @@
+numpy>=1.20.0
+scipy>=1.6.0
+matplotlib>=3.3.0
+open3d>=0.13.0
+networkx>=2.5
+python-louvain>=0.15
+paramiko>=2.7.0
+pillow>=8.0.0
+toml>=0.10.0
+
+# Note: ROMI dependencies should be installed from their repositories
+# https://github.com/romi/romi-apps
+# https://github.com/romi/plant-3d-vision
