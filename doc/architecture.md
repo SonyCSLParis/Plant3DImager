@@ -1,44 +1,87 @@
 # System Architecture
 
-This document presents the system architecture and the interactions between different modules.
+This document presents the system architecture and the interactions between different modules of the Plant Imaging and Leaf Targeting System.
 
-## Overall Architecture
+## Core Components and Modules
 
-The Plant Imaging and Leaf Targeting System consists of five main modules that work together to create a complete workflow for plant imaging and analysis:
+The system is organized around a central core that provides shared functionality to specialized modules:
 
 ```mermaid
 graph TD
-    subgraph Core["CORE"]
-        Hardware["Hardware Controllers"]
-        Geometry["Geometry Utilities"]
-        Data["Data Management"]
-        Utils["Utilities & Config"]
-    end
-    
-    Core --> Acquisition["Image Acquisition"]
-    Core --> Targeting["Leaf Targeting"]
-    Core --> Manual["Manual Control"]
-    Core --> Sync["Server Synchronization"]
+    Core[Core Components] --> Acquisition[Image Acquisition]
+    Core --> Targeting[Leaf Targeting]
+    Core --> Manual[Manual Control]
+    Core --> Sync[Server Synchronization]
     
     Acquisition --> Sync
     Sync --> Targeting
-    
-    Scripts["Execution Scripts"] --> Acquisition
-    Scripts --> Targeting
-    Scripts --> Manual
-    Scripts --> Sync
-    
-    Main["main.py"] --> Scripts
-    
-    Acquisition --> Results["Results Storage"]
-    Targeting --> Results
-    Manual --> Results
-    Sync --> Results
 ```
 
-## Detailed Module Structure
+- **Core Components**: Provide shared functionality for hardware control, geometry calculations, data management, and configuration
+- **Image Acquisition**: Captures plant images along circular paths
+- **Server Synchronization**: Transfers data to server for 3D processing
+- **Leaf Targeting**: Analyzes 3D point clouds to target individual leaves
+- **Manual Control**: Provides direct control of the robot
 
-The system follows a modular architecture where each component has a specific responsibility:
+## Complete Workflow
+
+The system supports a complete workflow for plant imaging and analysis:
+
+```mermaid
+graph LR
+    A[1. Image Acquisition] --> B[2. Server Synchronization] --> C[3. Leaf Targeting]
+    
+    style A fill:#d0f0c0,stroke:#333
+    style B fill:#c0d0f0,stroke:#333
+    style C fill:#f0d0c0,stroke:#333
+```
+
+### 1. Image Acquisition
+
+```mermaid
+graph TD
+    A1[Plan circular path] --> A2[Position camera at each point]
+    A2 --> A3[Take photos]
+    A3 --> A4[Generate metadata]
+```
+
+The acquisition module captures images along a circular path around the plant:
+- Plans trajectory based on configuration parameters
+- Positions the camera at each point with correct orientation
+- Takes photos with appropriate stabilization time
+- Generates metadata (camera position, angle, timestamp)
+
+### 2. Server Synchronization
+
+```mermaid
+graph TD
+    S1[Upload images to server] --> S2[Launch 3D processing]
+    S2 --> S3[Retrieve point cloud]
+```
+
+The synchronization module handles data exchange with the ROMI server:
+- Uploads acquisition data to the server
+- Launches the Plant-3D-Vision pipeline for 3D reconstruction
+- Retrieves the generated point cloud for local processing
+
+### 3. Leaf Targeting
+
+```mermaid
+graph TD
+    T1[Load point cloud] --> T2[Detect individual leaves]
+    T2 --> T3[Calculate optimal viewing points]
+    T3 --> T4[Move robot to target leaves]
+    T4 --> T5[Take individual leaf photos]
+```
+
+The targeting module analyzes and photographs individual leaves:
+- Loads the 3D point cloud
+- Detects leaf surfaces using the Louvain algorithm
+- Calculates optimal viewing positions
+- Moves the robot to each target leaf
+- Takes detailed photos of each leaf
+
+## Project Structure
 
 ```
 plant_robotics_system/
@@ -46,7 +89,7 @@ plant_robotics_system/
 │   ├── hardware/                      # Hardware controllers
 │   │   ├── cnc_controller.py          # CNC control
 │   │   ├── camera_controller.py       # Camera control
-│   │   └── gimbal_controller.py       # Gimbal control (updated with invert_tilt)
+│   │   └── gimbal_controller.py       # Gimbal control
 │   ├── geometry/                      # Geometric calculations
 │   │   ├── path_calculator.py         # Path calculation
 │   │   └── angle_calculator.py        # Camera angle calculation
@@ -89,11 +132,8 @@ plant_robotics_system/
 │   └── user_guide.md                  # Detailed usage instructions
 │
 ├── main.py                            # Main entry point
-│
 ├── config.json                        # Global JSON configuration
-│
 ├── requirements.txt                   # Python dependencies
-│
 ├── README.md                          # Project overview and quick start guide
 │
 └── results/                           # Results directory
@@ -120,7 +160,7 @@ plant_robotics_system/
 
 ### Main Entry Point
 
-The `main.py` file serves as the primary entry point and supports the following modes:
+The `main.py` file serves as the primary entry point and supports these modes:
 - Image acquisition in a circle
 - Leaf targeting
 - Manual control
@@ -129,7 +169,7 @@ The `main.py` file serves as the primary entry point and supports the following 
 
 ### Direct Scripts
 
-Each module can also be executed directly through its dedicated script:
+Each module can also be executed through its dedicated script:
 - `run_acquisition.py`: Run image acquisition
 - `run_targeting.py`: Run leaf targeting
 - `run_manual.py`: Run manual control
@@ -151,41 +191,7 @@ This system builds upon the [ROMI (RObotics for MIcrofarms)](https://github.com/
 3. **Data Flow**
    - Images → ROMI Plant-3D-Vision → Point Cloud → Targeting
 
-## Complete Workflow
-
-The system supports a complete plant imaging and analysis workflow:
-
-```mermaid
-flowchart TD
-    subgraph Acquisition["1. Image Acquisition"]
-        A1["Plan circular path"]
-        A2["Position camera at each point"]
-        A3["Take photos"]
-        A4["Generate metadata"]
-        A1 --> A2 --> A3 --> A4
-    end
-    
-    subgraph Sync["2. Server Synchronization"]
-        S1["Upload images to server"]
-        S2["Launch 3D processing"]
-        S3["Retrieve point cloud"]
-        S1 --> S2 --> S3
-    end
-    
-    subgraph Targeting["3. Leaf Targeting"]
-        T1["Load point cloud"]
-        T2["Detect individual leaves"]
-        T3["Calculate optimal viewing points"]
-        T4["Move robot to target leaves"]
-        T5["Take individual leaf photos"]
-        T1 --> T2 --> T3 --> T4 --> T5
-    end
-    
-    Acquisition --> Sync
-    Sync --> Targeting
-```
-
-## Module Interactions
+## Module Details
 
 ### Core Components
 
@@ -194,17 +200,17 @@ The `core` directory contains components shared across all modules:
 1. **Hardware Controllers**
    - `CNCController`: Manages XYZ movements of the robot
    - `CameraController`: Handles photo capture
-   - `GimbalController`: Controls camera orientation
+   - `GimbalController`: Controls camera orientation with pan and tilt angles
 
 2. **Geometry Utilities**
    - `path_calculator.py`: Plans circular trajectories and paths
-   - `angle_calculator.py`: Calculates camera angles
+   - `angle_calculator.py`: Calculates camera angles for target pointing
 
 3. **Data Management**
    - `storage_manager.py`: Manages file and directory operations
 
 4. **Utilities**
-   - `config.py`: Loads and provides access to configuration
+   - `config.py`: Loads and provides access to configuration parameters
 
 ### Acquisition Module
 
