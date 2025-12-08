@@ -1,0 +1,30 @@
+{
+  "export_info": {
+    "export_timestamp": "2025-12-01T17:20:04.144351",
+    "measurement_count": 1
+  },
+  "measurements": [
+    {
+      "timestamp": "2025-12-01T17:08:07.625506",
+      "config_name": "quick",
+      "config_details": {
+        "actinic": 64,
+        "description": "Quick measurement",
+        "frequency": 20.0,
+        "intensity": 0.3,
+        "length": 50,
+        "name": "quick",
+        "persist": false
+      },
+      "duration": 3.8664324283599854,
+      "data_count": 5,
+      "fluorescence_data": [
+        0.0165,
+        0.008,
+        0.0145,
+        0.0088,
+        0.0137
+      ]
+    }
+  ]
+}

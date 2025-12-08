@@ -1,0 +1,41 @@
+{
+    "filesets": [
+        {
+            "files": [
+                {
+                    "file": "00000_rgb.jpg",
+                    "id": "00000_rgb"
+                },
+                {
+                    "file": "00001_rgb.jpg",
+                    "id": "00001_rgb"
+                },
+                {
+                    "file": "00002_rgb.jpg",
+                    "id": "00002_rgb"
+                },
+                {
+                    "file": "00003_rgb.jpg",
+                    "id": "00003_rgb"
+                },
+                {
+                    "file": "00004_rgb.jpg",
+                    "id": "00004_rgb"
+                },
+                {
+                    "file": "00005_rgb.jpg",
+                    "id": "00005_rgb"
+                },
+                {
+                    "file": "00006_rgb.jpg",
+                    "id": "00006_rgb"
+                },
+                {
+                    "file": "00007_rgb.jpg",
+                    "id": "00007_rgb"
+                }
+            ],
+            "id": "images"
+        }
+    ]
+}

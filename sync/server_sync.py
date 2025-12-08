@@ -226,23 +226,47 @@ class ServerSync:
                 # 6. Retrieve PLY file
                 self.logger.info("[DOWNLOAD] Step 6/6: Retrieving point cloud")
                 
-                # Find PointCloud* directory
-                find_cmd = f"find '{self.remote_work_path}' -name 'PointCloud*' -type d | head -1"
-                success, pointcloud_dir = self.ssh.exec_command(find_cmd)
+                # Utiliser directement le chemin correct (sans /metadata/)
+                remote_ply = f"{self.remote_work_path}PointCloud_1_0____1_0_08ec0ed01c/PointCloud.ply"
+                self.logger.info("[DIRECT] Using direct path to PLY: %s", remote_ply)
                 
-                if not success or not pointcloud_dir:
-                    self.logger.error("[ERROR] Unable to find PointCloud directory")
-                    return False
-                
-                # Download PLY file
-                remote_ply = f"{pointcloud_dir.strip()}/PointCloud.ply"
                 local_ply = f"{self.local_ply_target}/PointCloud_{timestamp}.ply"
                 
-                if not self.ssh.download_file(remote_ply, local_ply):
-                    self.logger.error("[ERROR] Failed to download PLY")
-                    return False
+                # Ensure local target directory exists
+                os.makedirs(self.local_ply_target, exist_ok=True)
                 
-                self.logger.info("[SUCCESS] PLY file retrieved: %s", local_ply)
+                # Tester si le fichier existe
+                test_cmd = f"test -f '{remote_ply}' && echo 'File exists' || echo 'File not found'"
+                success, test_result = self.ssh.exec_command(test_cmd)
+                self.logger.info("[TEST] PLY file existence test: %s", test_result)
+                
+                if "File exists" in test_result:
+                    # Télécharger le fichier
+                    if not self.ssh.download_file(remote_ply, local_ply):
+                        self.logger.error("[ERROR] Failed to download PLY")
+                        return False
+                    
+                    self.logger.info("[SUCCESS] PLY file retrieved: %s", local_ply)
+                else:
+                    self.logger.error("[ERROR] PLY file not found at direct path")
+                    
+                    # Essayer de trouver le fichier par recherche
+                    self.logger.info("[SEARCH] Searching for PointCloud.ply files")
+                    find_ply_cmd = f"find '{self.remote_work_path}' -name 'PointCloud.ply' -type f | head -1"
+                    success, direct_ply_path = self.ssh.exec_command(find_ply_cmd)
+                    
+                    if success and direct_ply_path.strip():
+                        remote_ply = direct_ply_path.strip()
+                        self.logger.info("[FOUND] Found PLY file: %s", remote_ply)
+                        
+                        if not self.ssh.download_file(remote_ply, local_ply):
+                            self.logger.error("[ERROR] Failed to download PLY after search")
+                            return False
+                        
+                        self.logger.info("[SUCCESS] PLY file retrieved: %s", local_ply)
+                    else:
+                        self.logger.error("[ERROR] Could not find any PointCloud.ply file")
+                        return False
                 
                 # 7. Clean closure
                 self.ssh.close()

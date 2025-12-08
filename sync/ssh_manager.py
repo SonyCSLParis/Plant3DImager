@@ -80,9 +80,11 @@ class SSHManager:
             channel.get_pty()
             
             # Command with correct environment (based on our previous tests)
+            # MODIFICATION: Added export CUDA_VISIBLE_DEVICES=0 to restrict to first GPU
             full_command = (
                 "bash -l -c '"
                 "export PYTHONPATH=/home/ayman/plant-3d-vision && "
+                "export CUDA_VISIBLE_DEVICES=0 && "  # Added this line to select only first GPU
                 "unset ROMI_DB && "
                 "cd /home/ayman/plant-3d-vision && "
                 f"/home/ayman/.local/bin/romi_run_task {command_args}"
