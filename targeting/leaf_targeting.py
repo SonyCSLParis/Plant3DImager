@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-Main script for leaf targeting system (adapted for modular architecture)
+Main script for leaf targeting system with integrated fluorescence sensor
+Unified version that replaces both leaf_targeting.py and leaf_targeting_with_fluo.py
 """
 
 import os
@@ -15,11 +16,13 @@ import time
 from core.hardware.cnc_controller import CNCController
 from core.hardware.camera_controller import CameraController
 from core.hardware.gimbal_controller import GimbalController
+from core.hardware.fluo_controller import FluoController
 from core.data.storage_manager import StorageManager
 from core.utils import config
+from core.data.session_manager import SessionManager  # NEW: Session support
 
-# Imports from targeting-specific modules
-from targeting.modules.data_manager import load_and_scale_pointcloud, compute_cropped_alpha_shape, save_leaves_data
+# Imports from unified storage manager
+from core.data.storage_manager import StorageManager
 from targeting.modules.leaf_analyzer import calculate_adaptive_radius, build_connectivity_graph
 from targeting.modules.leaf_analyzer import detect_communities_louvain_multiple, extract_leaf_data_from_communities
 from targeting.modules.interactive_selector import select_leaf_with_matplotlib
@@ -28,7 +31,7 @@ from targeting.modules.robot_controller import RobotController
 from targeting.modules.visualization import visualize_path, visualize_complete_path
 
 class LeafTargeting:
-    """Main class for leaf targeting system"""
+    """Main class for leaf targeting system with integrated fluorescence sensor"""
     
     def __init__(self, args=None):
         """
@@ -46,9 +49,10 @@ class LeafTargeting:
         self.z_offset = 0.0
         self.arduino_port = config.ARDUINO_PORT
         self.simulate = False
-        self.auto_photo = False
+        self.take_photos = True  # NEW: Default to True (auto photos)
         self.louvain_coeff = 0.5
-        self.distance = 0.4  # Default distance to target leaves changed to 40 cm
+        self.distance = 0.1
+        self.enable_fluorescence = config.ENABLE_FLUORESCENCE  # From config
         
         # Update parameters with command line arguments
         if args:
@@ -58,6 +62,7 @@ class LeafTargeting:
         self.cnc = None
         self.camera = None
         self.gimbal = None
+        self.fluo_sensor = None
         self.robot = None
         
         # Storage manager
@@ -101,14 +106,19 @@ class LeafTargeting:
         if hasattr(args, 'simulate') and args.simulate is not None:
             self.simulate = args.simulate
         
-        if hasattr(args, 'auto_photo') and args.auto_photo is not None:
-            self.auto_photo = args.auto_photo
+        # NEW: Inverted photo logic
+        if hasattr(args, 'no_photo') and args.no_photo:
+            self.take_photos = False
         
         if hasattr(args, 'louvain_coeff') and args.louvain_coeff is not None:
             self.louvain_coeff = args.louvain_coeff
             
         if hasattr(args, 'distance') and args.distance is not None:
             self.distance = args.distance
+        
+        # NEW: Fluorescence disable option
+        if hasattr(args, 'disable_fluorescence') and args.disable_fluorescence:
+            self.enable_fluorescence = False
     
     def initialize(self):
         """Initialize components and directories"""
@@ -147,11 +157,32 @@ class LeafTargeting:
                 self.gimbal = GimbalController(self.arduino_port)
                 self.gimbal.connect()
                 
-                # Initialize robot controller
+                # Initialize fluorescence sensor if enabled
+                if self.enable_fluorescence:
+                    try:
+                        print("\n--- Initializing fluorescence sensor ---")
+                        self.fluo_sensor = FluoController("fluo", "fluo")
+                        
+                        status = self.fluo_sensor.get_device_status()
+                        if status['connected']:
+                            print(f"✅ Fluorescence sensor ready: {status['status']}")
+                        else:
+                            print(f"⚠️  Fluorescence sensor not ready: {status['status']}")
+                            print("   Continuing without fluorescence measurements...")
+                            self.fluo_sensor = None
+                    except Exception as e:
+                        print(f"⚠️  Could not initialize fluorescence sensor: {e}")
+                        print("   Continuing without fluorescence measurements...")
+                        self.fluo_sensor = None
+                else:
+                    print("Fluorescence measurements disabled by configuration")
+                
+                # Initialize robot controller with optional fluorescence sensor
                 self.robot = RobotController(
                     cnc=self.cnc,
                     camera=self.camera,
                     gimbal=self.gimbal,
+                    fluo_sensor=self.fluo_sensor,
                     output_dirs=self.session_dirs
                 )
             
@@ -163,6 +194,8 @@ class LeafTargeting:
             print(f"- Cropping method: {self.crop_method}")
             print(f"- Distance to leaves: {self.distance} m")
             print(f"- Simulation mode: {'Enabled' if self.simulate else 'Disabled'}")
+            print(f"- Auto photo mode: {'Enabled' if self.take_photos else 'Disabled'}")
+            print(f"- Fluorescence measurements: {'Enabled' if self.fluo_sensor else 'Disabled'}")
             
             self.initialized = True
             return True
@@ -178,48 +211,39 @@ class LeafTargeting:
             return False
         
         try:
-            # 1. Load point cloud
+            # 1-9. Processing steps using unified storage manager
             print("\n=== 1. Loading point cloud ===")
-            self.pcd, self.points = load_and_scale_pointcloud(self.point_cloud_path, self.scale)
+            self.pcd, self.points = self.storage.load_and_scale_pointcloud(self.point_cloud_path, self.scale)
             
-            # 2. Calculate Alpha Shape to extract surfaces
             print("\n=== 2. Computing Alpha Shape ===")
-            self.alpha_pcd, self.alpha_points = compute_cropped_alpha_shape(
+            self.alpha_pcd, self.alpha_points = self.storage.compute_cropped_alpha_shape(
                 self.pcd, self.points, self.alpha, self.crop_method, self.crop_percentage, 
                 self.z_offset, self.session_dirs["analysis"]
             )
             
-            # 3. Calculate connectivity radius
             print("\n=== 3. Computing connectivity radius ===")
             radius = calculate_adaptive_radius(self.alpha_points)
             
-            # 4. Louvain coefficient provided by user
             print(f"\n=== 4. Louvain Coefficient: {self.louvain_coeff} ===")
             coeff = self.louvain_coeff
             
-            # 5. Build connectivity graph
             print("\n=== 5. Building connectivity graph ===")
             graph = build_connectivity_graph(self.alpha_points, radius)
             
-            # 6. Determine minimum community size
             min_size = max(10, len(self.alpha_points) // 30)
             print(f"\n=== 6. Minimum community size: {min_size} points ===")
             
-            # 7. Detect communities with Louvain
             print("\n=== 7. Detecting communities ===")
             communities = detect_communities_louvain_multiple(graph, coeff, min_size, n_iterations=5)
             
-            # 8. Extract leaf data
             print("\n=== 8. Extracting leaf data ===")
             self.leaves_data = extract_leaf_data_from_communities(
                 communities, self.alpha_points, distance=self.distance
             )
             
-            # Save data
             leaves_json = os.path.join(self.session_dirs["analysis"], "leaves_data.json")
-            save_leaves_data(self.leaves_data, leaves_json)
+            self.storage.save_leaves_data(self.leaves_data, leaves_json)
             
-            # 9. Interactive leaf selection
             print("\n=== 9. Interactive leaf selection ===")
             self.selected_leaves = select_leaf_with_matplotlib(
                 self.leaves_data, self.points, self.session_dirs["visualizations"]
@@ -229,28 +253,23 @@ class LeafTargeting:
                 print("No leaves selected. Ending program.")
                 return True
             
-            # 10. Plan complete trajectory
+            # 10-11. Path planning and visualization (same as before)
             print("\n=== 10. Planning complete trajectory ===")
-            current_position = [0, 0, 0]  # Current position (replace with actual robot position)
+            current_position = [0, 0, 0]
             
-            # If not in simulation mode, get actual position
             if not self.simulate and self.cnc:
                 pos = self.cnc.get_position()
                 current_position = [pos['x'], pos['y'], pos['z']]
             
-            # Extract target points
             target_points = [leaf["target_point"] for leaf in self.selected_leaves]
             
-            # Plan complete trajectory - distance is already accounted for in target_points
             complete_path = plan_complete_path(
                 current_position, target_points, config.CENTER_POINT, config.CIRCLE_RADIUS, 
                 config.NUM_POSITIONS
             )
             
-            # 11. Visualize complete trajectory
             print("\n=== 11. Visualizing complete trajectory ===")
             
-            # Prepare selected leaf data for visualization
             leaf_points_list = []
             leaf_normals_list = []
             
@@ -265,37 +284,40 @@ class LeafTargeting:
                 else:
                     leaf_normals_list.append(np.array([0, 0, 1]))
             
-            # Visualize complete trajectory
             visualize_complete_path(
                 complete_path, self.points, leaf_points_list, leaf_normals_list, 
                 self.session_dirs["visualizations"]
             )
             
-            # In simulation mode, stop here
             if self.simulate:
                 print("\nSimulation mode: Program complete.")
                 return True
             
-            # 12. Execute trajectory
+            # 12. Execute trajectory with unified photo/fluorescence logic
             print("\n=== 12. Executing trajectory ===")
             
-            # Get leaf centroids and IDs
+            if self.fluo_sensor:
+                print("🧬 Fluorescence measurements enabled")
+            else:
+                print("📷 Photo-only mode")
+            
             leaf_centroids = [leaf['centroid'] for leaf in self.selected_leaves]
             leaf_ids = [leaf['id'] for leaf in self.selected_leaves]
             
-            # Execute complete trajectory
             success = self.robot.execute_path(
                 complete_path,
                 leaf_centroids=leaf_centroids,
                 leaf_ids=leaf_ids,
-                auto_photo=self.auto_photo,
+                auto_photo=self.take_photos,  # Use unified photo logic
                 stabilization_time=config.STABILIZATION_TIME
             )
             
             if success:
-                print("\nTrajectory completed successfully.")
+                print("\n✅ Trajectory completed successfully.")
+                if self.fluo_sensor:
+                    print("🧬 Fluorescence data saved in analysis/ directory")
             else:
-                print("\nError during trajectory execution.")
+                print("\n❌ Error during trajectory execution.")
             
             return success
             
@@ -314,10 +336,16 @@ class LeafTargeting:
         """Properly shut down the system"""
         print("\nShutting down targeting system...")
         
-        # Stop controllers in reverse order of initialization
         if hasattr(self, 'robot') and self.robot and not self.simulate:
             self.robot.shutdown()
         elif not self.simulate:
+            if hasattr(self, 'fluo_sensor') and self.fluo_sensor:
+                try:
+                    # Fluorescence sensor doesn't have explicit shutdown, just let it be
+                    pass
+                except:
+                    pass
+            
             if hasattr(self, 'gimbal') and self.gimbal:
                 self.gimbal.shutdown()
             
@@ -332,8 +360,8 @@ class LeafTargeting:
 
 
 def parse_arguments():
-    """Parse command line arguments"""
-    parser = argparse.ArgumentParser(description='Leaf targeting system')
+    """Parse command line arguments with unified fluorescence and photo options"""
+    parser = argparse.ArgumentParser(description='Leaf targeting system with integrated fluorescence measurements')
     
     parser.add_argument('point_cloud', help='Point cloud file (PLY/PCD)')
     parser.add_argument('--scale', type=float, default=0.001, help='Scale factor for point cloud (default: 0.001 = mm->m)')
@@ -344,14 +372,21 @@ def parse_arguments():
     parser.add_argument('--z_offset', type=float, default=0.0, help='Z offset for cropping (default: 0.0)')
     parser.add_argument('--arduino_port', default=config.ARDUINO_PORT, help=f'Arduino serial port (default: {config.ARDUINO_PORT})')
     parser.add_argument('--simulate', action='store_true', help='Simulation mode (no robot control)')
-    parser.add_argument('--auto_photo', action='store_true', help='Take photos automatically at each target')
+    
+    # NEW: Inverted photo logic
+    parser.add_argument('--no-photo', action='store_true', help='Disable automatic photo capture (default: photos enabled)')
+    
     parser.add_argument('--louvain_coeff', type=float, default=0.5, help='Coefficient for Louvain detection (default: 0.5)')
-    parser.add_argument('--distance', type=float, default=0.04, help='Distance to target leaves in meters (default: 0.4 m)')
+    parser.add_argument('--distance', type=float, default=0.1, help='Distance to target leaves in meters (default: 0.1 m)')
+    
+    # NEW: Fluorescence disable option
+    parser.add_argument('--disable-fluorescence', action='store_true', 
+                       help='Disable fluorescence measurements (photo only)')
     
     return parser.parse_args()
 
 def main():
-    """Main function compatible with original implementation"""
+    """Main function with unified fluorescence integration"""
     args = parse_arguments()
     targeting = LeafTargeting(args)
     success = targeting.run_targeting()

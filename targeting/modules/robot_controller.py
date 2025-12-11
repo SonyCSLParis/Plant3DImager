@@ -3,17 +3,19 @@ import time
 import math
 import numpy as np
 import os
+import json
 from datetime import datetime
 
 class RobotController:
-    def __init__(self, cnc=None, camera=None, gimbal=None, output_dirs=None, speed=0.1, update_interval=0.1):
+    def __init__(self, cnc=None, camera=None, gimbal=None, fluo_sensor=None, output_dirs=None, speed=0.1, update_interval=0.1):
         """
-        Initialize robot controller
+        Initialize robot controller with optional fluorescence sensor support
         
         Args:
             cnc: CNCController instance
             camera: CameraController instance
             gimbal: GimbalController instance
+            fluo_sensor: FluoController instance (optional)
             output_dirs: Dictionary of output directories
             speed: Movement speed (m/s)
             update_interval: Update interval during movement (s)
@@ -21,6 +23,7 @@ class RobotController:
         self.cnc = cnc
         self.camera = camera
         self.gimbal = gimbal
+        self.fluo_sensor = fluo_sensor  # Can be None
         self.speed = speed
         self.update_interval = update_interval
         
@@ -29,17 +32,27 @@ class RobotController:
         if output_dirs and 'images' in output_dirs:
             self.photos_dir = output_dirs['images']
         
+        # Analysis directory for fluorescence data
+        self.analysis_dir = None
+        if output_dirs and 'analysis' in output_dirs:
+            self.analysis_dir = output_dirs['analysis']
+        
         # State
         self.initialized = cnc is not None and camera is not None and gimbal is not None
+        self.fluo_available = fluo_sensor is not None
         
         if self.initialized:
             print("Robot controller successfully initialized.")
+            if self.fluo_available:
+                print("Fluorescence sensor available for measurements.")
+            else:
+                print("No fluorescence sensor - photo-only mode.")
         else:
             print("Robot controller partially initialized - some components missing.")
     
     def execute_path(self, path, leaf_centroids=None, leaf_ids=None, auto_photo=True, stabilization_time=3.0):
         """
-        Execute a complete trajectory
+        Execute a complete trajectory with optional fluorescence measurements
         
         Args:
             path: List of dictionaries describing the trajectory
@@ -56,11 +69,12 @@ class RobotController:
             return False
         
         try:
-            # Variables to track leaves
+            # Variables to track leaves and fluorescence data
             current_leaf_index = 0
             photos_taken = []
+            fluorescence_data = []
             
-            # Identify target points and last intermediate points before each target
+            # Identify target points
             target_indices = []
             for i, point_info in enumerate(path):
                 if point_info["type"] == "target":
@@ -86,24 +100,18 @@ class RobotController:
                     continue
                 
                 # Check if we're at last intermediate point before a target point
-                # i.e., a via_point directly followed by a target
                 if point_type == "via_point" and i+1 < len(path) and path[i+1]["type"] == "target":
-                    # Find index of next leaf
                     next_target_index = i + 1
                     next_leaf_index = target_indices.index(next_target_index)
                     
                     if leaf_centroids is not None and next_leaf_index < len(leaf_centroids):
                         print(f"\n--- Orienting toward leaf at last intermediate point ---")
                         
-                        # Get current position
                         final_pos = self.cnc.get_position()
-                        
-                        # Get next leaf centroid
                         next_leaf_centroid = leaf_centroids[next_leaf_index]
                         
                         print(f"DEBUG: Orienting toward centroid: {next_leaf_centroid}")
                         
-                        # Orient camera toward next leaf centroid
                         success = self.gimbal.aim_at_target(final_pos, next_leaf_centroid, wait=True, invert_tilt=True)
                         
                         if not success:
@@ -113,21 +121,15 @@ class RobotController:
                 
                 # If it's a target point and we have leaf centroids
                 if point_type == "target" and leaf_centroids is not None and current_leaf_index < len(leaf_centroids):
-                    # Get current leaf information
                     leaf_centroid = leaf_centroids[current_leaf_index]
                     leaf_id = leaf_ids[current_leaf_index] if leaf_ids and current_leaf_index < len(leaf_ids) else None
                     
-                    print(f"\n--- Orienting toward leaf {leaf_id if leaf_id is not None else ''} ---")
+                    print(f"\n--- Targeting leaf {leaf_id if leaf_id is not None else current_leaf_index + 1} ---")
                     
-                    # Get final position
                     final_pos = self.cnc.get_position()
                     
-                    # Display debug info about original centroid
                     print(f"DEBUG: Fine adjustment toward centroid: {leaf_centroid}")
                     
-                    # Orient camera toward leaf with tilt inversion
-                    # We use original centroid without modification,
-                    # and invert tilt in aim_at_target method
                     success = self.gimbal.aim_at_target(final_pos, leaf_centroid, wait=True, invert_tilt=True)
                     
                     if not success:
@@ -139,7 +141,8 @@ class RobotController:
                     print(f"Stabilizing for {stabilization_time} seconds...")
                     time.sleep(stabilization_time)
                     
-                    # Take photo automatically if requested
+                    # Take photo based on auto_photo setting
+                    photo_taken = False
                     if auto_photo:
                         timestamp = time.strftime("%Y%m%d-%H%M%S")
                         if leaf_id is not None:
@@ -147,7 +150,6 @@ class RobotController:
                         else:
                             filename = f"leaf_target_{current_leaf_index+1}_{timestamp}.jpg"
                         
-                        # Create dictionary with camera pose information
                         camera_pose = {
                             'x': final_pos['x'],
                             'y': final_pos['y'],
@@ -160,9 +162,10 @@ class RobotController:
                         
                         if photo_path:
                             photos_taken.append((photo_path, leaf_id))
+                            photo_taken = True
                             print(f"Photo taken: {photo_path}")
                     else:
-                        # Offer to take photo manually
+                        # Manual photo confirmation
                         take_photo = input("\nTake a photo? (y/n): ").lower()
                         if take_photo == 'y':
                             timestamp = time.strftime("%Y%m%d-%H%M%S")
@@ -171,7 +174,6 @@ class RobotController:
                             else:
                                 filename = f"leaf_target_{current_leaf_index+1}_{timestamp}.jpg"
                             
-                            # Create dictionary with camera pose information
                             camera_pose = {
                                 'x': final_pos['x'],
                                 'y': final_pos['y'],
@@ -184,16 +186,57 @@ class RobotController:
                             
                             if photo_path:
                                 photos_taken.append((photo_path, leaf_id))
+                                photo_taken = True
                                 print(f"Photo taken: {photo_path}")
+                    
+                    # Fluorescence measurement if sensor available
+                    if self.fluo_available:
+                        print("\n=== FLUORESCENCE MEASUREMENT ===")
+                        
+                        print("Step 1/4: Rotating camera 180 degrees for fluorescence measurement...")
+                        success = self.gimbal.send_command(0, 180, wait_for_goal=True)
+                        
+                        if not success:
+                            print("❌ Error: Could not rotate camera for fluorescence measurement")
+                        else:
+                            print("✅ Camera rotated successfully")
+                            
+                            print("Step 2/4: Performing fluorescence measurement...")
+                            measurements = self.fluo_sensor.measure_simple()
+                            
+                            if measurements:
+                                print("Step 3/4: Saving fluorescence data...")
+                                fluo_data = self.save_fluorescence_data(
+                                    measurements, leaf_id, final_pos, current_leaf_index
+                                )
+                                fluorescence_data.append(fluo_data)
+                                
+                                print(f"✅ Fluorescence measurement completed: {len(measurements)} points")
+                                print(f"   Average fluorescence: {np.mean(measurements):.6f}")
+                            else:
+                                print("❌ Error: No fluorescence data received")
+                            
+                            print("Step 4/4: Rotating camera back to original position...")
+                            success = self.gimbal.send_command(0, -180, wait_for_goal=True)
+                            if success:
+                                print("✅ Camera rotated back to original position")
+                            else:
+                                print("❌ Warning: Could not rotate camera back")
                     
                     # Increment leaf index
                     current_leaf_index += 1
             
-            # Photos summary
+            # Summary
             if photos_taken:
                 print("\n=== PHOTOS SUMMARY ===")
                 for i, (path, leaf_id) in enumerate(photos_taken):
                     print(f"{i+1}. Leaf {leaf_id if leaf_id is not None else '?'}: {path}")
+            
+            if fluorescence_data and self.fluo_available:
+                print("\n=== FLUORESCENCE SUMMARY ===")
+                for i, data in enumerate(fluorescence_data):
+                    avg_fluoro = np.mean(data['measurements'])
+                    print(f"{i+1}. Leaf {data['leaf_id']}: {len(data['measurements'])} points, avg = {avg_fluoro:.6f}")
             
             return True
             
@@ -202,6 +245,49 @@ class RobotController:
             import traceback
             traceback.print_exc()
             return False
+    
+    def save_fluorescence_data(self, measurements, leaf_id, position, leaf_index):
+        """
+        Save fluorescence measurements to JSON file
+        """
+        timestamp = datetime.now().isoformat()
+        
+        fluo_data = {
+            "timestamp": timestamp,
+            "leaf_id": leaf_id if leaf_id is not None else f"leaf_{leaf_index + 1}",
+            "leaf_index": leaf_index,
+            "position": {
+                "x": position['x'],
+                "y": position['y'], 
+                "z": position['z']
+            },
+            "camera_angles": {
+                "pan": self.gimbal.current_pan,
+                "tilt": self.gimbal.current_tilt
+            },
+            "measurements": measurements,
+            "statistics": {
+                "count": len(measurements),
+                "mean": float(np.mean(measurements)),
+                "std": float(np.std(measurements)),
+                "min": float(np.min(measurements)),
+                "max": float(np.max(measurements))
+            }
+        }
+        
+        # Save to file if analysis directory exists
+        if self.analysis_dir:
+            filename = f"fluorescence_leaf_{fluo_data['leaf_id']}_{timestamp.replace(':', '-')}.json"
+            filepath = os.path.join(self.analysis_dir, filename)
+            
+            try:
+                with open(filepath, 'w') as f:
+                    json.dump(fluo_data, f, indent=2)
+                print(f"   Fluorescence data saved: {filepath}")
+            except Exception as e:
+                print(f"   Warning: Could not save fluorescence data: {e}")
+        
+        return fluo_data
     
     def normalize_angle_difference(self, delta):
         """Normalize angle difference to take shortest path"""
@@ -215,16 +301,14 @@ class RobotController:
         """Properly shut down the robot"""
         print("Shutting down robot...")
         
-        # Perform same operations as in old version
         if self.cnc is not None:
             try:
                 print("Moving to position (0, 0, 0)...")
                 self.cnc.move_to(0, 0, 0, wait=True)
                 
                 print("Returning to home position (homing)...")
-                self.cnc.home()  # Explicit homing here
+                self.cnc.home()
                 
-                # We don't do power_down here as it will be done by main controller
             except Exception as e:
                 print(f"Error during homing: {e}")
         
@@ -235,5 +319,13 @@ class RobotController:
                 self.gimbal.reset_position()
             except Exception as e:
                 print(f"Error resetting camera: {e}")
+        
+        # Fluorescence sensor cleanup (if needed)
+        if self.fluo_sensor is not None:
+            try:
+                # Most RCom devices don't need explicit shutdown
+                pass
+            except Exception as e:
+                print(f"Error shutting down fluorescence sensor: {e}")
         
         return True

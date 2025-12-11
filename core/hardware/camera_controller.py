@@ -3,6 +3,7 @@
 
 """
 Unified camera controller for acquisition and targeting modules
+FIXED: Added power_up() in connect() method
 """
 
 import os
@@ -25,6 +26,11 @@ class CameraController:
         try:
             print("Initializing camera...")
             self.camera = Camera("camera", "camera")
+            
+            # FIX: Power up the camera so grab() will work
+            print("Powering up camera...")
+            self.camera.power_up()
+            
             self.initialized = True
             return self
         except Exception as e:
@@ -74,6 +80,14 @@ class CameraController:
         """Properly shut down the camera"""
         if not self.initialized:
             return True
-            
+        
+        # FIX: Power down the camera properly
+        if self.camera:
+            try:
+                print("Powering down camera...")
+                self.camera.power_down()
+            except Exception as e:
+                print(f"Warning: Error powering down camera: {e}")
+                
         self.initialized = False
         return True

@@ -30,6 +30,7 @@ _defaults = {
     "RESULTS_DIR": "results",
     "ACQUISITION_DIR": "plant_acquisition",
     "TARGETING_DIR": "leaf_targeting",
+    "ENABLE_FLUORESCENCE": True,
     "SSH_HOST": "10.0.7.22",
     "SSH_USER": "ayman",
     "KEY_PATH": "/home/romi/.ssh/id_rsa",
@@ -133,6 +134,7 @@ STABILIZATION_TIME = get("STABILIZATION_TIME")
 RESULTS_DIR = get("RESULTS_DIR")
 ACQUISITION_DIR = get("ACQUISITION_DIR")
 TARGETING_DIR = get("TARGETING_DIR")
+ENABLE_FLUORESCENCE = get("ENABLE_FLUORESCENCE")
 SSH_HOST = get("SSH_HOST")
 SSH_USER = get("SSH_USER")
 KEY_PATH = get("KEY_PATH")
