@@ -267,8 +267,9 @@ if targeting_data:
     leaves_data = targeting_data["leaves_data"] 
     visited_leaves = targeting_data["visited_leaves"]
     
-    # Charger données pour affichage
-    time_data, fluor_data, fluor_config = load_fluorescence_data_for_leaf(session_dir, visited_leaves[0] if visited_leaves else 1)
+    # Charger données pour affichage (première feuille par défaut)
+    current_leaf_id = visited_leaves[0] if visited_leaves else 1
+    time_data, fluor_data, fluor_config = load_fluorescence_data_for_leaf(session_dir, current_leaf_id)
     pc_x, pc_y, pc_z, pc_colors, pc_sizes = load_pointcloud_with_targeting(session_dir, leaves_data, visited_leaves)
     leaf_info = get_leaf_info_for_display(leaves_data, visited_leaves)
     leaf_image_src = load_leaf_image_for_display(session_dir, visited_leaves)
@@ -293,6 +294,9 @@ else:
         "analysis_date": "2025-12-11"
     }
     leaf_image_src = None
+    visited_leaves = []
+    session_dir = None
+    leaves_data = {"leaves": []}
 
 # Layout responsive
 app.layout = html.Div([
@@ -321,8 +325,8 @@ app.layout = html.Div([
                         line=dict(width=0)  # Pas de contour pour les points
                     ),
                     name='Point Cloud',
-                    text=[f'Point {i}' if pc_colors[i] == 'black' else f'Visited Leaf' for i in range(len(pc_colors))],
-                    hovertemplate='<b>%{text}</b><br>X: %{x:.3f}<br>Y: %{y:.3f}<br>Z: %{z:.3f}<extra></extra>'
+                    text=['Point cloud' if pc_colors[i] == 'black' else f'Feuille visitée' for i in range(len(pc_colors))],
+                    hovertemplate='<b>%{text}</b><br>X: %{x:.3f}<br>Y: %{y:.3f}<br>Z: %{z:.3f}<br><i>Cliquez pour sélectionner</i><extra></extra>'
                 )]).update_layout(
                     scene=dict(aspectmode='cube'),
                     margin=dict(l=0, r=0, b=0, t=30),
@@ -341,13 +345,15 @@ app.layout = html.Div([
         
         # Panneau de droite (plus large)
         html.Div([
-            # Info panel
+            # Info panel - maintenant dynamique
             html.Div([
                 html.H4("Informations Feuille", style={'marginBottom': '10px', 'fontSize': '14px'}),
-                html.P(f"ID: {leaf_info['leaf_id']}", style={'margin': '5px 0', 'fontSize': '12px'}),
-                html.P(f"Centroïde: {leaf_info['centroid']}", style={'margin': '5px 0', 'fontSize': '12px'}),
-                html.P(f"État: {leaf_info['health_status']}", style={'margin': '5px 0', 'fontSize': '12px'}),
-                html.P(f"Date: {leaf_info['analysis_date']}", style={'margin': '5px 0', 'fontSize': '12px'})
+                html.Div([
+                    html.P(f"ID: {leaf_info['leaf_id']}", style={'margin': '5px 0', 'fontSize': '12px'}),
+                    html.P(f"Centroïde: {leaf_info['centroid']}", style={'margin': '5px 0', 'fontSize': '12px'}),
+                    html.P(f"État: {leaf_info['health_status']}", style={'margin': '5px 0', 'fontSize': '12px'}),
+                    html.P(f"Date: {leaf_info['analysis_date']}", style={'margin': '5px 0', 'fontSize': '12px'})
+                ], id='leaf-info-content')
             ], style={
                 'backgroundColor': '#f8f9fa', 
                 'padding': '15px', 
@@ -358,7 +364,7 @@ app.layout = html.Div([
                 'border': '1px solid #000'  # Bordure noire fine
             }),
             
-            # Image panel avec ratio 16:9  
+            # Image panel avec ratio 16:9 - maintenant dynamique
             html.Div([
                 html.H4("Image Feuille", style={'marginBottom': '10px', 'fontSize': '14px'}),
                 html.Div([
@@ -368,7 +374,7 @@ app.layout = html.Div([
                             'width': '100%',
                             'height': 'auto',
                             'maxHeight': '160px',
-                            'aspectRatio': '16/9',  # Force le ratio 2304x1296 (16:9)
+                            'aspectRatio': '16/9',
                             'objectFit': 'contain',
                             'borderRadius': '5px',
                             'backgroundColor': '#e9ecef'
@@ -382,9 +388,9 @@ app.layout = html.Div([
                         'borderRadius': '5px',
                         'color': '#6c757d',
                         'fontSize': '12px',
-                        'aspectRatio': '16/9'  # Même ratio pour le placeholder
+                        'aspectRatio': '16/9'
                     })
-                ], style={
+                ], id='leaf-image-content', style={
                     'height': '160px',
                     'display': 'flex',
                     'alignItems': 'center',
@@ -413,7 +419,7 @@ app.layout = html.Div([
         'gap': '15px'  # Gap plus large
     }),
     
-    # Graphique fluorescence en bas
+    # Graphique fluorescence en bas - maintenant dynamique
     html.Div([
         dcc.Graph(
             id='fluorescence-chart',
@@ -424,13 +430,13 @@ app.layout = html.Div([
                 name='Fluorescence',
                 line=dict(color='green', width=3)
             )]).update_layout(
-                title=f"Mesure Fluorescence - {fluor_config.get('name', 'Unknown')}",
+                title=f"Mesure Fluorescence - {fluor_config.get('name', f'Feuille {current_leaf_id if targeting_data else 1}')}",
                 xaxis_title="Temps (s)",
                 yaxis_title="Intensité",
                 margin=dict(l=50, r=50, b=50, t=50),
-                plot_bgcolor='white'  # Fond blanc pour le graphique
-            ),
-            style={'height': '280px'}  # Réduit de 300px à 280px
+                plot_bgcolor='white',
+                height=280
+            )
         )
     ], style={
         'border': '1px solid #000',  # Bordure noire fine
@@ -486,6 +492,186 @@ app.index_string = '''
     </body>
 </html>
 '''
+
+# Variables globales pour callbacks
+app_data = {
+    'targeting_data': targeting_data,
+    'session_dir': session_dir,
+    'leaves_data': leaves_data,
+    'visited_leaves': visited_leaves,
+    'current_leaf_id': current_leaf_id if targeting_data else 1
+}
+
+def find_clicked_leaf(click_data, visited_leaves, leaves_data):
+    """Trouve la feuille la plus proche du point cliqué"""
+    if not click_data or not click_data.get('points'):
+        return None
+    
+    # Coordonnées du clic
+    clicked_point = click_data['points'][0]
+    click_x = clicked_point['x']
+    click_y = clicked_point['y'] 
+    click_z = clicked_point['z']
+    
+    # Trouver la feuille la plus proche
+    min_distance = float('inf')
+    closest_leaf_id = None
+    
+    for leaf in leaves_data.get('leaves', []):
+        if leaf['id'] in visited_leaves:
+            centroid = leaf['centroid']
+            
+            # Distance euclidienne
+            distance = ((click_x - centroid[0])**2 + 
+                       (click_y - centroid[1])**2 + 
+                       (click_z - centroid[2])**2)**0.5
+            
+            if distance < min_distance:
+                min_distance = distance
+                closest_leaf_id = leaf['id']
+    
+    # Seuil de proximité (2cm)
+    if min_distance < 0.02:
+        return closest_leaf_id
+    return None
+
+def get_leaf_info_by_id(leaf_id, leaves_data):
+    """Récupère les infos d'une feuille par son ID"""
+    for leaf in leaves_data.get('leaves', []):
+        if leaf['id'] == leaf_id:
+            return {
+                "leaf_id": f"LEAF_{leaf['id']:03d}",
+                "centroid": leaf['centroid'],
+                "health_status": leaf.get('health_status', 'Unknown'),
+                "analysis_date": "2025-12-11"
+            }
+    return {
+        "leaf_id": f"LEAF_{leaf_id:03d}",
+        "centroid": [0, 0, 0],
+        "health_status": "Unknown", 
+        "analysis_date": "2025-12-11"
+    }
+
+def get_leaf_image_by_id(leaf_id, session_dir):
+    """Charge l'image d'une feuille par son ID"""
+    if not session_dir:
+        return None
+    
+    images_dir = Path(session_dir) / "images"
+    img_files = list(images_dir.glob(f"leaf_{leaf_id}_*.jpg"))
+    
+    if not img_files:
+        return None
+    
+    img_path = img_files[0]
+    
+    try:
+        with open(img_path, 'rb') as f:
+            encoded = base64.b64encode(f.read()).decode()
+        return f"data:image/jpeg;base64,{encoded}"
+    except Exception as e:
+        print(f"Erreur chargement image feuille {leaf_id}: {e}")
+        return None
+
+# Callback pour mise à jour des infos feuille
+@app.callback(
+    Output('leaf-info-content', 'children'),
+    [Input('pointcloud-3d', 'clickData')]
+)
+def update_leaf_info(click_data):
+    # Chercher si une feuille a été cliquée
+    clicked_leaf_id = find_clicked_leaf(click_data, app_data['visited_leaves'], app_data['leaves_data'])
+    
+    if clicked_leaf_id and clicked_leaf_id != app_data['current_leaf_id']:
+        app_data['current_leaf_id'] = clicked_leaf_id
+        print(f"🍃 Feuille sélectionnée: {clicked_leaf_id}")
+    
+    leaf_info = get_leaf_info_by_id(app_data['current_leaf_id'], app_data['leaves_data'])
+    
+    return [
+        html.P(f"ID: {leaf_info['leaf_id']}", style={'margin': '5px 0', 'fontSize': '12px'}),
+        html.P(f"Centroïde: {leaf_info['centroid']}", style={'margin': '5px 0', 'fontSize': '12px'}),
+        html.P(f"État: {leaf_info['health_status']}", style={'margin': '5px 0', 'fontSize': '12px'}),
+        html.P(f"Date: {leaf_info['analysis_date']}", style={'margin': '5px 0', 'fontSize': '12px'})
+    ]
+
+# Callback pour mise à jour de l'image
+@app.callback(
+    Output('leaf-image-content', 'children'),
+    [Input('pointcloud-3d', 'clickData')]
+)
+def update_leaf_image(click_data):
+    # Chercher si une feuille a été cliquée
+    clicked_leaf_id = find_clicked_leaf(click_data, app_data['visited_leaves'], app_data['leaves_data'])
+    
+    if clicked_leaf_id:
+        app_data['current_leaf_id'] = clicked_leaf_id
+    
+    leaf_image_src = get_leaf_image_by_id(app_data['current_leaf_id'], app_data['session_dir'])
+    
+    if leaf_image_src:
+        return html.Img(
+            src=leaf_image_src,
+            style={
+                'width': '100%',
+                'height': 'auto',
+                'maxHeight': '160px',
+                'aspectRatio': '16/9',
+                'objectFit': 'contain',
+                'borderRadius': '5px',
+                'backgroundColor': '#e9ecef'
+            }
+        )
+    else:
+        return html.Div(
+            f"Image feuille {app_data['current_leaf_id']} non trouvée",
+            style={
+                'height': '160px',
+                'backgroundColor': '#e9ecef',
+                'display': 'flex',
+                'alignItems': 'center',
+                'justifyContent': 'center',
+                'borderRadius': '5px',
+                'color': '#6c757d',
+                'fontSize': '12px',
+                'aspectRatio': '16/9'
+            }
+        )
+
+# Callback pour mise à jour du graphique
+@app.callback(
+    Output('fluorescence-chart', 'figure'),
+    [Input('pointcloud-3d', 'clickData')]
+)
+def update_fluorescence_chart(click_data):
+    # Chercher si une feuille a été cliquée
+    clicked_leaf_id = find_clicked_leaf(click_data, app_data['visited_leaves'], app_data['leaves_data'])
+    
+    if clicked_leaf_id:
+        app_data['current_leaf_id'] = clicked_leaf_id
+    
+    leaf_id = app_data['current_leaf_id']
+    
+    # Charger données fluorescence pour cette feuille
+    if app_data['session_dir']:
+        time_data, fluor_data, fluor_config = load_fluorescence_data_for_leaf(app_data['session_dir'], leaf_id)
+    else:
+        time_data, fluor_data, fluor_config = [0, 1, 2, 3, 4], [0.016, 0.008, 0.014, 0.009, 0.014], {}
+    
+    return go.Figure(data=[go.Scatter(
+        x=time_data, 
+        y=fluor_data,
+        mode='lines+markers',
+        name='Fluorescence',
+        line=dict(color='green', width=3)
+    )]).update_layout(
+        title=f"Mesure Fluorescence - Feuille {leaf_id}",
+        xaxis_title="Temps (s)",
+        yaxis_title="Intensité",
+        margin=dict(l=50, r=50, b=50, t=50),
+        plot_bgcolor='white',
+        height=280
+    )
 
 def main():
     """Lance l'application en mode navigateur"""
