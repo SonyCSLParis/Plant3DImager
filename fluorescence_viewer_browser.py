@@ -15,6 +15,61 @@ app = dash.Dash(__name__)
 
 app = dash.Dash(__name__)
 
+# Health status colors mapping (pour affichage textuel)
+HEALTH_COLORS = {
+    "Critique": "#D32F2F",    # Rouge foncé
+    "Stressé": "#FF7043",     # Orange-rouge  
+    "Normal": "#FFA726",      # Orange
+    "Bon": "#66BB6A",         # Vert clair
+    "Excellent": "#2E7D32"    # Vert foncé
+}
+
+def get_health_color(health_status):
+    """Retourne la couleur correspondant à l'état de santé (pour texte)"""
+    return HEALTH_COLORS.get(health_status, "#808080")  # Gris par défaut
+
+def normalize_fluorescence_values(leaves_data, visited_leaves):
+    """Normalise les valeurs de fluorescence entre 0 et 1"""
+    # Récupérer toutes les valeurs de fluorescence des feuilles visitées
+    fluor_values = []
+    for leaf in leaves_data.get('leaves', []):
+        if leaf['id'] in visited_leaves and 'fluorescence_mean' in leaf:
+            fluor_values.append(leaf['fluorescence_mean'])
+    
+    if not fluor_values:
+        return {}
+    
+    # Calcul min/max pour normalisation
+    min_fluor = min(fluor_values)
+    max_fluor = max(fluor_values)
+    
+    # Eviter division par zéro
+    if max_fluor == min_fluor:
+        return {leaf['id']: 0.5 for leaf in leaves_data.get('leaves', []) if leaf['id'] in visited_leaves}
+    
+    # Normaliser chaque feuille
+    normalized = {}
+    for leaf in leaves_data.get('leaves', []):
+        if leaf['id'] in visited_leaves and 'fluorescence_mean' in leaf:
+            norm_value = (leaf['fluorescence_mean'] - min_fluor) / (max_fluor - min_fluor)
+            normalized[leaf['id']] = norm_value
+    
+    return normalized
+
+def fluorescence_to_color(normalized_value):
+    """Convertit valeur normalisée (0-1) en couleur RGB avec gradient rouge->vert"""
+    # Clamp entre 0 et 1
+    value = max(0, min(1, normalized_value))
+    
+    # Gradient rouge (0) vers vert (1)
+    # Rouge: (255, 0, 0) -> Vert: (0, 128, 0)
+    red = int(255 * (1 - value))      # 255 à 0
+    green = int(128 * value)          # 0 à 128  
+    blue = 0                          # Toujours 0
+    
+    # Convertir en hex
+    return f"#{red:02x}{green:02x}{blue:02x}"
+
 def find_latest_targeting_session():
     """Trouve le répertoire de session de targeting le plus récent"""
     base_pattern = "results/leaf_targeting/leaf_analysis_*"
@@ -129,22 +184,35 @@ def load_pointcloud_with_targeting(session_dir, leaves_data, visited_leaves):
         colors = ['black'] * len(x)
         sizes = [1] * len(x)
         
-        # Identifier les feuilles visitées et les marquer en rouge
+        # Calculer les valeurs normalisées pour le gradient
+        normalized_values = normalize_fluorescence_values(leaves_data, visited_leaves)
+        
+        # Identifier les feuilles visitées et les colorer avec gradient
         visited_centroids = []
+        centroid_colors = []
         for leaf in leaves_data.get('leaves', []):
             if leaf['id'] in visited_leaves:
                 centroid = leaf['centroid']
+                
+                # Utiliser gradient basé sur fluorescence normalisée
+                if leaf['id'] in normalized_values:
+                    norm_value = normalized_values[leaf['id']]
+                    gradient_color = fluorescence_to_color(norm_value)
+                else:
+                    gradient_color = "#808080"  # Gris si pas de données
+                
                 visited_centroids.append(centroid)
+                centroid_colors.append(gradient_color)
         
-        # Ajouter les centroïdes comme points séparés (en rouge, plus gros)
+        # Ajouter les centroïdes comme points séparés (gradient, plus gros)
         if visited_centroids:
             centroids_array = np.array(visited_centroids)
             # Ajouter les centroïdes aux coordonnées
             x = np.concatenate([x, centroids_array[:, 0]])
             y = np.concatenate([y, centroids_array[:, 1]]) 
             z = np.concatenate([z, centroids_array[:, 2]])
-            # Ajouter couleurs et tailles pour les centroïdes
-            colors.extend(['red'] * len(visited_centroids))
+            # Ajouter couleurs gradient et tailles pour les centroïdes
+            colors.extend(centroid_colors)
             sizes.extend([15] * len(visited_centroids))  # Beaucoup plus gros
         
         return x, y, z, colors, sizes
@@ -160,19 +228,32 @@ def load_pointcloud_with_targeting(session_dir, leaves_data, visited_leaves):
                 colors = ['black'] * len(x)
                 sizes = [1] * len(x)
                 
-                # Ajouter centroïdes visitées
+                # Calculer les valeurs normalisées pour le gradient
+                normalized_values = normalize_fluorescence_values(leaves_data, visited_leaves)
+                
+                # Ajouter centroïdes visitées avec gradient de couleurs
                 visited_centroids = []
+                centroid_colors = []
                 for leaf in leaves_data.get('leaves', []):
                     if leaf['id'] in visited_leaves:
                         centroid = leaf['centroid']
+                        
+                        # Utiliser gradient basé sur fluorescence normalisée
+                        if leaf['id'] in normalized_values:
+                            norm_value = normalized_values[leaf['id']]
+                            gradient_color = fluorescence_to_color(norm_value)
+                        else:
+                            gradient_color = "#808080"  # Gris si pas de données
+                        
                         visited_centroids.append(centroid)
+                        centroid_colors.append(gradient_color)
                 
                 if visited_centroids:
                     centroids_array = np.array(visited_centroids)
                     x = np.concatenate([x, centroids_array[:, 0]])
                     y = np.concatenate([y, centroids_array[:, 1]]) 
                     z = np.concatenate([z, centroids_array[:, 2]])
-                    colors.extend(['red'] * len(visited_centroids))
+                    colors.extend(centroid_colors)
                     sizes.extend([15] * len(visited_centroids))
                 
                 return x, y, z, colors, sizes
@@ -330,7 +411,7 @@ app.layout = html.Div([
                 )]).update_layout(
                     scene=dict(aspectmode='cube'),
                     margin=dict(l=0, r=0, b=0, t=30),
-                    title="Point Cloud 3D - Feuilles visitées en rouge"
+                    title="Point Cloud 3D - Gradient Rouge→Vert (santé des feuilles)"
                 ),
                 style={'height': '400px', 'width': '100%'}
             )
@@ -447,7 +528,7 @@ app.layout = html.Div([
     }),
     
     html.Hr(),
-    html.P("💡 Visualisation des résultats de targeting - Appuyez sur Ctrl+C pour arrêter", 
+    html.P("Sony Computer Science Laboratories - 2025/2026", 
            style={'textAlign': 'center', 'color': '#666'})
 ], style={
     'padding': '20px', 

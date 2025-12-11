@@ -32,6 +32,36 @@ from targeting.modules.path_planner import plan_safe_path, plan_complete_path
 from targeting.modules.robot_controller import RobotController
 from targeting.modules.visualization import visualize_path, visualize_complete_path
 
+# Health status calculation based on fluorescence
+HEALTH_THRESHOLDS = {
+    "Critique": 0.010,     # < 0.010
+    "Stressé": 0.015,      # 0.010-0.015  
+    "Normal": 0.020,       # 0.015-0.020
+    "Bon": 0.025,          # 0.020-0.025
+    "Excellent": float('inf')  # > 0.025
+}
+
+HEALTH_COLORS = {
+    "Critique": "#D32F2F",    # Rouge foncé
+    "Stressé": "#FF7043",     # Orange-rouge
+    "Normal": "#FFA726",      # Orange
+    "Bon": "#66BB6A",         # Vert clair
+    "Excellent": "#2E7D32"    # Vert foncé
+}
+
+def calculate_health_from_fluorescence(mean_fluorescence):
+    """Calcule l'état de santé basé sur la moyenne de fluorescence"""
+    if mean_fluorescence < HEALTH_THRESHOLDS["Critique"]:
+        return "Critique"
+    elif mean_fluorescence < HEALTH_THRESHOLDS["Stressé"]:
+        return "Stressé"
+    elif mean_fluorescence < HEALTH_THRESHOLDS["Normal"]:
+        return "Normal"
+    elif mean_fluorescence < HEALTH_THRESHOLDS["Bon"]:
+        return "Bon"
+    else:
+        return "Excellent"
+
 class LeafTargeting:
     """Main class for leaf targeting system with integrated fluorescence sensor"""
     
@@ -207,6 +237,62 @@ class LeafTargeting:
             self.shutdown()
             return False
     
+    def _calculate_health_status_from_fluorescence(self):
+        """Calcule l'état de santé de chaque feuille basé sur les données de fluorescence"""
+        print("Calculating health status from fluorescence data...")
+        
+        # =======================================================================
+        # MODE ALÉATOIRE POUR POC - Génère des valeurs de fluorescence simulées
+        # =======================================================================
+        print("Using random fluorescence values for POC")
+        for leaf in self.leaves_data:
+            # Générer valeur aléatoire entre nos seuils de référence
+            mock_fluorescence_mean = 0.005 + np.random.random() * 0.025  # Entre 0.005 et 0.030
+            
+            leaf["fluorescence_mean"] = mock_fluorescence_mean
+            leaf["health_status"] = calculate_health_from_fluorescence(mock_fluorescence_mean)
+            
+            print(f"Leaf {leaf.get('id', '?')}: fluor={mock_fluorescence_mean:.4f} → {leaf['health_status']}")
+        
+        return
+        
+        # =======================================================================
+        # VRAIE LOGIQUE (COMMENTÉE) - À utiliser avec de vraies mesures 
+        # =======================================================================
+        """
+        # Si pas de capteur fluo, utiliser des valeurs aléatoires
+        if not self.fluo_sensor:
+            print("No fluorescence sensor - using mock data")
+            for leaf in self.leaves_data:
+                # Mock: valeurs aléatoires dans la gamme typique
+                mock_measurements = [0.005 + np.random.random() * 0.025 for _ in range(20)]
+                mean_fluor = np.mean(mock_measurements)
+                leaf["fluorescence_mean"] = mean_fluor
+                leaf["health_status"] = calculate_health_from_fluorescence(mean_fluor)
+            return
+        
+        # Avec capteur : utiliser vraies données 
+        for leaf in self.leaves_data:
+            try:
+                # TODO: Récupérer vraies mesures du capteur pour cette feuille
+                # measurements = self.get_fluorescence_measurements_for_leaf(leaf['id'])
+                # mean_fluor = np.mean(measurements)
+                
+                # Pour l'instant, utiliser mock data même avec capteur
+                mock_measurements = [0.005 + np.random.random() * 0.025 for _ in range(20)]
+                mean_fluor = np.mean(mock_measurements)
+                
+                leaf["fluorescence_mean"] = mean_fluor
+                leaf["health_status"] = calculate_health_from_fluorescence(mean_fluor)
+                
+                print(f"Leaf {leaf.get('id', '?')}: fluor={mean_fluor:.4f} → {leaf['health_status']}")
+                
+            except Exception as e:
+                print(f"Error calculating health for leaf {leaf.get('id', '?')}: {e}")
+                leaf["fluorescence_mean"] = 0.015  # Fallback
+                leaf["health_status"] = "Normal"
+        """
+    
     def run_targeting(self):
         """Execute the complete targeting process"""
         if not self.initialize():
@@ -243,10 +329,8 @@ class LeafTargeting:
                 communities, self.alpha_points, distance=self.distance
             )
             
-            # NEW: Add random health status for visualization
-            print("Adding random health status for viewer...")
-            for leaf in self.leaves_data:
-                leaf["health_status"] = random.choice(["Healthy", "Stressed", "Poor"])
+            # NEW: Calculate health status based on fluorescence
+            self._calculate_health_status_from_fluorescence()
             
             leaves_json = os.path.join(self.session_dirs["analysis"], "leaves_data.json")
             self.storage.save_leaves_data(self.leaves_data, leaves_json)
