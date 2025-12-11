@@ -4,6 +4,7 @@
 """
 Main script for leaf targeting system with integrated fluorescence sensor
 Unified version that replaces both leaf_targeting.py and leaf_targeting_with_fluo.py
+MODIFIED: Added viewer support (pointcloud copy + random health_status)
 """
 
 import os
@@ -11,6 +12,8 @@ import sys
 import argparse
 import numpy as np
 import time
+import random
+import shutil
 
 # Imports from new architecture
 from core.hardware.cnc_controller import CNCController
@@ -240,8 +243,19 @@ class LeafTargeting:
                 communities, self.alpha_points, distance=self.distance
             )
             
+            # NEW: Add random health status for visualization
+            print("Adding random health status for viewer...")
+            for leaf in self.leaves_data:
+                leaf["health_status"] = random.choice(["Healthy", "Stressed", "Poor"])
+            
             leaves_json = os.path.join(self.session_dirs["analysis"], "leaves_data.json")
             self.storage.save_leaves_data(self.leaves_data, leaves_json)
+            
+            # NEW: Copy point cloud for viewer access
+            print("Copying point cloud for viewer...")
+            pointcloud_copy = os.path.join(self.session_dirs["main"], "pointcloud.ply")
+            shutil.copy(self.point_cloud_path, pointcloud_copy)
+            print(f"Point cloud copied for viewer: {pointcloud_copy}")
             
             print("\n=== 9. Interactive leaf selection ===")
             self.selected_leaves = select_leaf_with_matplotlib(
@@ -315,6 +329,8 @@ class LeafTargeting:
                 print("\n✅ Trajectory completed successfully.")
                 if self.fluo_sensor:
                     print("🧬 Fluorescence data saved in analysis/ directory")
+                print(f"\n🌐 Launch viewer: python fluorescence_viewer_browser.py")
+                print(f"📂 Session data: {self.session_dirs['main']}")
             else:
                 print("\n❌ Error during trajectory execution.")
             

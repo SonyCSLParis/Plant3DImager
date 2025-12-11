@@ -1,0 +1,521 @@
+#!/usr/bin/env python3
+import dash
+from dash import html, dcc, Input, Output
+import plotly.graph_objects as go
+import plotly.express as px
+import json
+import numpy as np
+import os
+from pathlib import Path
+import base64
+import time
+import glob
+
+app = dash.Dash(__name__)
+
+app = dash.Dash(__name__)
+
+def find_latest_targeting_session():
+    """Trouve le répertoire de session de targeting le plus récent"""
+    base_pattern = "results/leaf_targeting/leaf_analysis_*"
+    session_dirs = glob.glob(base_pattern)
+    
+    if not session_dirs:
+        print("❌ Aucun répertoire de targeting trouvé")
+        return None
+    
+    # Trier par nom (timestamp) décroissant
+    session_dirs.sort(reverse=True)
+    latest_dir = session_dirs[0]
+    print(f"📂 Répertoire de session trouvé: {latest_dir}")
+    return Path(latest_dir)
+
+def load_targeting_data():
+    """Charge toutes les données d'une session de targeting"""
+    session_dir = find_latest_targeting_session()
+    if not session_dir:
+        return None
+    
+    # Charger les données des feuilles
+    leaves_data_path = session_dir / "analysis" / "leaves_data.json"
+    if not leaves_data_path.exists():
+        print("❌ Données des feuilles non trouvées")
+        return None
+    
+    with open(leaves_data_path, 'r') as f:
+        leaves_data = json.load(f)
+    
+    # Trouver les feuilles visitées (avec images)
+    images_dir = session_dir / "images"
+    visited_leaves = []
+    
+    if images_dir.exists():
+        for img_file in images_dir.glob("leaf_*.jpg"):
+            # Extraire l'ID de la feuille du nom du fichier
+            filename = img_file.stem
+            # Format: leaf_{id}_{timestamp}
+            parts = filename.split('_')
+            if len(parts) >= 2:
+                try:
+                    leaf_id = int(parts[1])
+                    visited_leaves.append(leaf_id)
+                except ValueError:
+                    continue
+    
+    visited_leaves = list(set(visited_leaves))  # Supprimer doublons
+    print(f"🍃 Feuilles visitées: {visited_leaves}")
+    
+    return {
+        "session_dir": session_dir,
+        "leaves_data": leaves_data,
+        "visited_leaves": visited_leaves
+    }
+
+def load_fluorescence_data_for_leaf(session_dir, leaf_id):
+    """Charge les données de fluorescence pour une feuille spécifique"""
+    analysis_dir = Path(session_dir) / "analysis"
+    
+    # Chercher le fichier de fluorescence pour cette feuille
+    fluo_files = list(analysis_dir.glob(f"fluorescence_leaf_{leaf_id}_*.json"))
+    
+    if not fluo_files:
+        print(f"⚠️ Pas de données fluorescence pour feuille {leaf_id}")
+        return [], {}
+    
+    # Prendre le fichier le plus récent
+    fluo_file = sorted(fluo_files)[-1]
+    
+    try:
+        with open(fluo_file, 'r') as f:
+            fluo_data = json.load(f)
+        
+        measurements = fluo_data.get('measurements', [])
+        
+        # Créer timeline basée sur la fréquence (simulée)
+        freq = 20.0  # Hz par défaut
+        time_points = [i/freq for i in range(len(measurements))]
+        
+        config = {
+            'frequency': freq,
+            'name': f'Leaf {leaf_id} Fluorescence'
+        }
+        
+        print(f"📊 Données fluorescence chargées pour feuille {leaf_id}: {len(measurements)} points")
+        return time_points, measurements, config
+        
+    except Exception as e:
+        print(f"❌ Erreur chargement fluorescence feuille {leaf_id}: {e}")
+        return [], {}
+
+def load_pointcloud_with_targeting(session_dir, leaves_data, visited_leaves):
+    """Charge le point cloud et identifie les feuilles visitées"""
+    pointcloud_path = Path(session_dir) / "pointcloud.ply"
+    
+    try:
+        from plyfile import PlyData
+        
+        # Lire le fichier PLY
+        plydata = PlyData.read(pointcloud_path)
+        vertex_data = plydata['vertex']
+        
+        # Extraire les coordonnées et appliquer le même scaling que le targeting
+        x = vertex_data['x'] * 0.001  # Convertir mm -> m
+        y = vertex_data['y'] * 0.001  # Convertir mm -> m
+        z = vertex_data['z'] * 0.001  # Convertir mm -> m
+        
+        print(f"☁️ Point cloud chargé: {len(x)} points")
+        
+        # Créer array des couleurs (noir par défaut)
+        colors = ['black'] * len(x)
+        sizes = [1] * len(x)
+        
+        # Identifier les feuilles visitées et les marquer en rouge
+        visited_centroids = []
+        for leaf in leaves_data.get('leaves', []):
+            if leaf['id'] in visited_leaves:
+                centroid = leaf['centroid']
+                visited_centroids.append(centroid)
+        
+        # Ajouter les centroïdes comme points séparés (en rouge, plus gros)
+        if visited_centroids:
+            centroids_array = np.array(visited_centroids)
+            # Ajouter les centroïdes aux coordonnées
+            x = np.concatenate([x, centroids_array[:, 0]])
+            y = np.concatenate([y, centroids_array[:, 1]]) 
+            z = np.concatenate([z, centroids_array[:, 2]])
+            # Ajouter couleurs et tailles pour les centroïdes
+            colors.extend(['red'] * len(visited_centroids))
+            sizes.extend([15] * len(visited_centroids))  # Beaucoup plus gros
+        
+        return x, y, z, colors, sizes
+        
+    except ImportError:
+        print("plyfile non installé, utilisation de trimesh...")
+        try:
+            import trimesh
+            mesh = trimesh.load(pointcloud_path)
+            if hasattr(mesh, 'vertices'):
+                vertices = mesh.vertices * 0.001  # Convertir mm -> m
+                x, y, z = vertices[:, 0], vertices[:, 1], vertices[:, 2]
+                colors = ['black'] * len(x)
+                sizes = [1] * len(x)
+                
+                # Ajouter centroïdes visitées
+                visited_centroids = []
+                for leaf in leaves_data.get('leaves', []):
+                    if leaf['id'] in visited_leaves:
+                        centroid = leaf['centroid']
+                        visited_centroids.append(centroid)
+                
+                if visited_centroids:
+                    centroids_array = np.array(visited_centroids)
+                    x = np.concatenate([x, centroids_array[:, 0]])
+                    y = np.concatenate([y, centroids_array[:, 1]]) 
+                    z = np.concatenate([z, centroids_array[:, 2]])
+                    colors.extend(['red'] * len(visited_centroids))
+                    sizes.extend([15] * len(visited_centroids))
+                
+                return x, y, z, colors, sizes
+        except:
+            print("Erreur trimesh, utilisation des données mock")
+    except Exception as e:
+        print(f"Erreur lecture PLY: {e}, utilisation des données mock")
+    
+    # Données mock pour le POC si rien ne fonctionne
+    n_points = 2000
+    t = np.linspace(0, 4*np.pi, n_points)
+    
+    x = np.cos(t) * (1 + 0.3*np.cos(3*t)) + np.random.normal(0, 0.05, n_points)
+    y = np.sin(t) * (1 + 0.3*np.cos(3*t)) + np.random.normal(0, 0.05, n_points)
+    z = 0.1 * np.sin(2*t) + np.random.normal(0, 0.02, n_points)
+    
+    colors = ['black'] * len(x)
+    sizes = [1] * len(x)
+    
+    # Ajouter quelques centroïdes mock
+    if visited_leaves:
+        mock_centroids = [[0.2, 0.3, 0.1], [0.5, 0.1, 0.15]][:len(visited_leaves)]
+        for centroid in mock_centroids:
+            x = np.append(x, centroid[0])
+            y = np.append(y, centroid[1])
+            z = np.append(z, centroid[2])
+            colors.append('red')
+            sizes.append(15)
+    
+    print(f"☁️ Point cloud mock généré: {len(x)} points")
+    return x, y, z, colors, sizes
+
+def get_leaf_info_for_display(leaves_data, visited_leaves):
+    """Récupère les infos de la première feuille visitée pour l'affichage"""
+    if not visited_leaves:
+        return {
+            "leaf_id": "Aucune",
+            "centroid": [0, 0, 0],
+            "health_status": "Unknown",
+            "analysis_date": "N/A"
+        }
+    
+    # Prendre la première feuille visitée
+    first_leaf_id = visited_leaves[0]
+    
+    for leaf in leaves_data.get('leaves', []):
+        if leaf['id'] == first_leaf_id:
+            return {
+                "leaf_id": f"LEAF_{leaf['id']:03d}",
+                "centroid": leaf['centroid'],
+                "health_status": leaf.get('health_status', 'Unknown'),
+                "analysis_date": "2025-12-11"  # Date du jour par défaut
+            }
+    
+    return {
+        "leaf_id": f"LEAF_{first_leaf_id:03d}",
+        "centroid": [0, 0, 0],
+        "health_status": "Unknown", 
+        "analysis_date": "2025-12-11"
+    }
+
+def load_leaf_image_for_display(session_dir, visited_leaves):
+    """Charge l'image de la première feuille visitée"""
+    if not visited_leaves:
+        return None
+    
+    images_dir = Path(session_dir) / "images"
+    first_leaf_id = visited_leaves[0]
+    
+    # Chercher l'image de cette feuille
+    img_files = list(images_dir.glob(f"leaf_{first_leaf_id}_*.jpg"))
+    
+    if not img_files:
+        return None
+    
+    # Prendre la première image trouvée
+    img_path = img_files[0]
+    
+    try:
+        with open(img_path, 'rb') as f:
+            encoded = base64.b64encode(f.read()).decode()
+        return f"data:image/jpeg;base64,{encoded}"
+    except Exception as e:
+        print(f"Erreur chargement image: {e}")
+        return None
+
+# Chargement des données depuis le targeting
+targeting_data = load_targeting_data()
+
+if targeting_data:
+    session_dir = targeting_data["session_dir"]
+    leaves_data = targeting_data["leaves_data"] 
+    visited_leaves = targeting_data["visited_leaves"]
+    
+    # Charger données pour affichage
+    time_data, fluor_data, fluor_config = load_fluorescence_data_for_leaf(session_dir, visited_leaves[0] if visited_leaves else 1)
+    pc_x, pc_y, pc_z, pc_colors, pc_sizes = load_pointcloud_with_targeting(session_dir, leaves_data, visited_leaves)
+    leaf_info = get_leaf_info_for_display(leaves_data, visited_leaves)
+    leaf_image_src = load_leaf_image_for_display(session_dir, visited_leaves)
+    
+    print(f"✅ Données chargées pour {len(visited_leaves)} feuilles visitées")
+else:
+    # Fallback données mock
+    print("⚠️ Aucune donnée de targeting, utilisation données mock")
+    time_data, fluor_data, fluor_config = [0, 1, 2, 3, 4], [0.016, 0.008, 0.014, 0.009, 0.014], {}
+    
+    n_points = 1000
+    pc_x = np.random.normal(0.2, 0.1, n_points)
+    pc_y = np.random.normal(0.2, 0.1, n_points)
+    pc_z = np.random.uniform(0.0, 0.4, n_points)
+    pc_colors = ['black'] * n_points
+    pc_sizes = [1] * n_points
+    
+    leaf_info = {
+        "leaf_id": "MOCK_001",
+        "centroid": [0.2, 0.2, 0.2],
+        "health_status": "Healthy",
+        "analysis_date": "2025-12-11"
+    }
+    leaf_image_src = None
+
+# Layout responsive
+app.layout = html.Div([
+    html.H1("🌿 Leaf Targeting Results Viewer - ROMI", 
+            style={
+                'textAlign': 'center', 
+                'marginBottom': '20px', 
+                'color': '#2d5016',
+                'fontFamily': 'Georgia, serif',  # Police serif élégante
+                'fontWeight': 'bold',
+                'fontSize': '28px',
+                'textShadow': '1px 1px 2px rgba(0,0,0,0.1)'
+            }),
+    
+    html.Div([
+        # Zone principale - Point Cloud (plus étroite)
+        html.Div([
+            dcc.Graph(
+                id='pointcloud-3d',
+                figure=go.Figure(data=[go.Scatter3d(
+                    x=pc_x, y=pc_y, z=pc_z,
+                    mode='markers',
+                    marker=dict(
+                        size=pc_sizes, 
+                        color=pc_colors,
+                        line=dict(width=0)  # Pas de contour pour les points
+                    ),
+                    name='Point Cloud',
+                    text=[f'Point {i}' if pc_colors[i] == 'black' else f'Visited Leaf' for i in range(len(pc_colors))],
+                    hovertemplate='<b>%{text}</b><br>X: %{x:.3f}<br>Y: %{y:.3f}<br>Z: %{z:.3f}<extra></extra>'
+                )]).update_layout(
+                    scene=dict(aspectmode='cube'),
+                    margin=dict(l=0, r=0, b=0, t=30),
+                    title="Point Cloud 3D - Feuilles visitées en rouge"
+                ),
+                style={'height': '400px', 'width': '100%'}
+            )
+        ], style={
+            'flex': '1.2',  # Réduit de 2 à 1.2 pour laisser plus de place à l'image
+            'marginRight': '10px',
+            'minWidth': '300px',
+            'border': '1px solid #000',  # Bordure noire fine
+            'borderRadius': '5px',
+            'backgroundColor': 'white'
+        }),
+        
+        # Panneau de droite (plus large)
+        html.Div([
+            # Info panel
+            html.Div([
+                html.H4("Informations Feuille", style={'marginBottom': '10px', 'fontSize': '14px'}),
+                html.P(f"ID: {leaf_info['leaf_id']}", style={'margin': '5px 0', 'fontSize': '12px'}),
+                html.P(f"Centroïde: {leaf_info['centroid']}", style={'margin': '5px 0', 'fontSize': '12px'}),
+                html.P(f"État: {leaf_info['health_status']}", style={'margin': '5px 0', 'fontSize': '12px'}),
+                html.P(f"Date: {leaf_info['analysis_date']}", style={'margin': '5px 0', 'fontSize': '12px'})
+            ], style={
+                'backgroundColor': '#f8f9fa', 
+                'padding': '15px', 
+                'borderRadius': '5px',
+                'marginBottom': '10px',
+                'height': '180px',
+                'overflow': 'auto',
+                'border': '1px solid #000'  # Bordure noire fine
+            }),
+            
+            # Image panel avec ratio 16:9  
+            html.Div([
+                html.H4("Image Feuille", style={'marginBottom': '10px', 'fontSize': '14px'}),
+                html.Div([
+                    html.Img(
+                        src=leaf_image_src if leaf_image_src else "",
+                        style={
+                            'width': '100%',
+                            'height': 'auto',
+                            'maxHeight': '160px',
+                            'aspectRatio': '16/9',  # Force le ratio 2304x1296 (16:9)
+                            'objectFit': 'contain',
+                            'borderRadius': '5px',
+                            'backgroundColor': '#e9ecef'
+                        }
+                    ) if leaf_image_src else html.Div("Image non trouvée", style={
+                        'height': '160px',
+                        'backgroundColor': '#e9ecef',
+                        'display': 'flex',
+                        'alignItems': 'center',
+                        'justifyContent': 'center',
+                        'borderRadius': '5px',
+                        'color': '#6c757d',
+                        'fontSize': '12px',
+                        'aspectRatio': '16/9'  # Même ratio pour le placeholder
+                    })
+                ], style={
+                    'height': '160px',
+                    'display': 'flex',
+                    'alignItems': 'center',
+                    'justifyContent': 'center'
+                })
+            ], style={
+                'flex': '1',
+                'border': '1px solid #000',  # Bordure noire fine
+                'borderRadius': '5px',
+                'backgroundColor': 'white',
+                'padding': '10px'
+            })
+        ], style={
+            'flex': '1.3',  # Augmenté de 1 à 1.3 pour plus d'espace pour l'image
+            'display': 'flex', 
+            'flexDirection': 'column',
+            'minWidth': '280px',  # Augmenté de 250px
+            'maxWidth': '400px'   # Augmenté de 350px
+        })
+    ], style={
+        'display': 'flex', 
+        'height': 'auto',  # Hauteur auto au lieu de fixe
+        'minHeight': '400px',  # Hauteur minimum 
+        'marginBottom': '30px',  # Plus d'espace avant le graphique du bas
+        'flexWrap': 'wrap',
+        'gap': '15px'  # Gap plus large
+    }),
+    
+    # Graphique fluorescence en bas
+    html.Div([
+        dcc.Graph(
+            id='fluorescence-chart',
+            figure=go.Figure(data=[go.Scatter(
+                x=time_data, 
+                y=fluor_data,
+                mode='lines+markers',
+                name='Fluorescence',
+                line=dict(color='green', width=3)
+            )]).update_layout(
+                title=f"Mesure Fluorescence - {fluor_config.get('name', 'Unknown')}",
+                xaxis_title="Temps (s)",
+                yaxis_title="Intensité",
+                margin=dict(l=50, r=50, b=50, t=50),
+                plot_bgcolor='white'  # Fond blanc pour le graphique
+            ),
+            style={'height': '280px'}  # Réduit de 300px à 280px
+        )
+    ], style={
+        'border': '1px solid #000',  # Bordure noire fine
+        'borderRadius': '5px',
+        'backgroundColor': 'white',
+        'padding': '10px',  # Plus de padding interne
+        'marginTop': '10px'  # Marge en haut pour séparer des blocs du dessus
+    }),
+    
+    html.Hr(),
+    html.P("💡 Visualisation des résultats de targeting - Appuyez sur Ctrl+C pour arrêter", 
+           style={'textAlign': 'center', 'color': '#666'})
+], style={
+    'padding': '20px', 
+    'fontFamily': 'Arial', 
+    'maxWidth': '100%', 
+    'overflow': 'hidden',
+    'backgroundColor': '#f5f7fa',  # Fond gris-bleu clair
+    'minHeight': '100vh'  # Hauteur min plein écran
+})
+
+# Ajout de CSS pour responsive design
+app.index_string = '''
+<!DOCTYPE html>
+<html>
+    <head>
+        {%metas%}
+        <title>{%title%}</title>
+        {%favicon%}
+        {%css%}
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            @media (max-width: 768px) {
+                .main-container {
+                    flex-direction: column !important;
+                    height: auto !important;
+                }
+                .main-container > div {
+                    min-width: 100% !important;
+                    margin-right: 0 !important;
+                    margin-bottom: 10px !important;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        {%app_entry%}
+        <footer>
+            {%config%}
+            {%scripts%}
+            {%renderer%}
+        </footer>
+    </body>
+</html>
+'''
+
+def main():
+    """Lance l'application en mode navigateur"""
+    print("🚀 Démarrage du Leaf Targeting Results Viewer...")
+    print("=" * 50)
+    
+    # Déterminer l'IP de la machine
+    import socket
+    try:
+        # Obtenir l'IP locale
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+    except:
+        local_ip = "localhost"
+    
+    print(f"🌐 URL: http://{local_ip}:8050")
+    print("ℹ️  Arrêt: Ctrl+C")
+    if targeting_data:
+        print(f"📂 Session: {targeting_data['session_dir'].name}")
+        print(f"🍃 Feuilles visitées: {len(targeting_data['visited_leaves'])}")
+    else:
+        print("⚠️  Mode fallback: données mock")
+    print("=" * 50)
+    
+    # Lancer l'application (accessible depuis le réseau)
+    import logging
+    logging.getLogger('werkzeug').setLevel(logging.ERROR)  # Supprimer warning
+    app.run(debug=False, port=8050, host='0.0.0.0')
+
+if __name__ == '__main__':
+    main()
