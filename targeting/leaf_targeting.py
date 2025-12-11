@@ -19,7 +19,6 @@ from core.hardware.gimbal_controller import GimbalController
 from core.hardware.fluo_controller import FluoController
 from core.data.storage_manager import StorageManager
 from core.utils import config
-from core.data.session_manager import SessionManager  # NEW: Session support
 
 # Imports from unified storage manager
 from core.data.storage_manager import StorageManager
