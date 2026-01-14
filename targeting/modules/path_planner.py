@@ -2,190 +2,221 @@
 # -*- coding: utf-8 -*-
 
 """
-Path planning module for leaf targeting
+Path planning with cubic splines and avoidance waypoints
 """
 
 import numpy as np
 import math
 import os
-from core.geometry.path_calculator import calculate_circle_positions, find_closest_point_index
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
+from scipy.interpolate import CubicSpline
+from core.utils import config
 
-def plan_safe_path(circle_position, target_point, leaf_position):
-    """
-    Plan a safe trajectory between a point on the circle and a leaf
-    
-    Args:
-        circle_position: Position on the circle [x, y, z]
-        target_point: Target position near the leaf [x, y, z] (already calculated with appropriate distance)
-        leaf_position: Leaf position (centroid) [x, y, z]
-    
-    Returns:
-        List of dictionaries describing the trajectory
-    """
-    # Convert positions to numpy arrays for easier calculations
-    circle_pos = np.array(circle_position)
-    leaf_pos = np.array(leaf_position)
-    target_pos = np.array(target_point)
-    
-    # Calculate actual distance between leaf and target point
-    real_distance = np.linalg.norm(target_pos - leaf_pos)
-    print(f"DEBUG: Calculated distance between target point and leaf: {real_distance:.3f} m")
-    
-    # Create trajectory
-    path = []
-    
-    # Starting point on circle
-    path.append({
-        "position": circle_pos.tolist(),
-        "type": "via_point",
-        "comment": "Position on circle"
-    })
-    
-    # Intermediate point for leaf approach
-    # (halfway between circle and leaf)
-    middle_pos = circle_pos + 0.5 * (target_pos - circle_pos)
-    path.append({
-        "position": middle_pos.tolist(),
-        "type": "via_point",
-        "comment": "Approaching leaf"
-    })
-    
-    # Target point near leaf (uses precalculated point directly)
-    path.append({
-        "position": target_pos.tolist(),
-        "type": "target",
-        "comment": f"Target point near leaf (distance: {real_distance:.3f} m)"
-    })
-    
-    # Return path (same as approach but in reverse)
-    path.append({
-        "position": middle_pos.tolist(),
-        "type": "via_point",
-        "comment": "Returning to circle"
-    })
-    
-    return path
+# Cylinder avoidance parameters
+CYLINDER_CENTER = (config.CENTER_POINT[0], config.CENTER_POINT[1])
+CYLINDER_RADIUS = 0.15  # 15cm safety radius
+CYLINDER_Z_MIN = -0.315
+CYLINDER_Z_MAX = 0.0
+APPROACH_DISTANCE = 0.20  # 20cm from centroid
+AVOIDANCE_RADIUS = 0.25  # 25cm - circle for waypoints placement
 
-def plan_complete_path(start_position, target_points, center_point, circle_radius, 
-                      num_circle_points, leaf_distance=None):
-    """
-    Plan a complete trajectory including the circle and leaf approaches
+def point_in_cylinder(point, center_xy, radius, z_min, z_max):
+    """Check if point is inside cylinder"""
+    x, y, z = point
+    cx, cy = center_xy
     
-    Args:
-        start_position: Starting position [x, y, z]
-        target_points: List of target points (leaves) [[x, y, z], ...]
-        center_point: Circle center [x, y, z]
-        circle_radius: Circle radius
-        num_circle_points: Number of points on circle
-        leaf_distance: Ignored parameter, kept for compatibility (distance already accounted for)
+    if z < z_min or z > z_max:
+        return False
     
-    Returns:
-        List of dictionaries describing the complete trajectory
-    """
-    if leaf_distance is not None:
-        print(f"Note: 'leaf_distance' parameter is ignored as distance is already accounted for in target points")
+    radial_dist = math.sqrt((x - cx)**2 + (y - cy)**2)
+    return radial_dist <= radius
+
+def line_intersects_cylinder(start, end, center_xy, radius, z_min, z_max):
+    """Check if direct line intersects cylinder"""
+    for i in range(50):
+        t = i / 49
+        point = (
+            start[0] + t * (end[0] - start[0]),
+            start[1] + t * (end[1] - start[1]),
+            start[2] + t * (end[2] - start[2])
+        )
+        if point_in_cylinder(point, center_xy, radius, z_min, z_max):
+            return True
+    return False
+
+def generate_avoidance_waypoints(start, end, center_xy, avoidance_radius, num_waypoints=2):
+    """Generate waypoints on external circle for spline path"""
+    sx, sy, sz = start
+    ex, ey, ez = end
+    cx, cy = center_xy
     
-    if not target_points:
+    # Calculate angles to start and end points
+    start_angle = math.atan2(sy - cy, sx - cx)
+    end_angle = math.atan2(ey - cy, ex - cx)
+    
+    # Choose shorter arc direction
+    angle_diff = end_angle - start_angle
+    if angle_diff > math.pi:
+        angle_diff -= 2 * math.pi
+    elif angle_diff < -math.pi:
+        angle_diff += 2 * math.pi
+    
+    # Generate waypoints along arc
+    waypoints = []
+    for i in range(1, num_waypoints + 1):
+        t = i / (num_waypoints + 1)
+        
+        # Interpolate angle
+        current_angle = start_angle + t * angle_diff
+        
+        # Position on avoidance circle
+        wx = cx + avoidance_radius * math.cos(current_angle)
+        wy = cy + avoidance_radius * math.sin(current_angle)
+        wz = sz + t * (ez - sz)  # Linear Z interpolation
+        
+        waypoints.append((wx, wy, wz))
+    
+    return waypoints
+
+def create_spline_trajectory(start, end, waypoints=None, num_points=12):
+    """Create smooth spline trajectory through waypoints"""
+    
+    # Build control points
+    if waypoints:
+        control_points = [start] + waypoints + [end]
+    else:
+        # Direct path with intermediate point for smoothness
+        mid_x = (start[0] + end[0]) / 2
+        mid_y = (start[1] + end[1]) / 2
+        mid_z = (start[2] + end[2]) / 2 + 0.03  # Slight Z lift
+        control_points = [start, (mid_x, mid_y, mid_z), end]
+    
+    # Convert to arrays
+    control_array = np.array(control_points)
+    
+    # Parameter values (cumulative distance approximation)
+    t_values = [0]
+    for i in range(1, len(control_points)):
+        dist = np.linalg.norm(np.array(control_points[i]) - np.array(control_points[i-1]))
+        t_values.append(t_values[-1] + dist)
+    
+    t_values = np.array(t_values)
+    
+    # Create cubic splines for each dimension
+    spline_x = CubicSpline(t_values, control_array[:, 0], bc_type='natural')
+    spline_y = CubicSpline(t_values, control_array[:, 1], bc_type='natural')
+    spline_z = CubicSpline(t_values, control_array[:, 2], bc_type='natural')
+    
+    # Sample points along spline
+    t_sample = np.linspace(t_values[0], t_values[-1], num_points)
+    
+    trajectory = []
+    for t in t_sample:
+        point = (float(spline_x(t)), float(spline_y(t)), float(spline_z(t)))
+        trajectory.append(point)
+    
+    return trajectory
+
+def plan_spline_trajectory(start, end, num_points=12):
+    """Plan trajectory using splines with cylinder avoidance"""
+    
+    print(f"Planning spline: {start} -> {end}")
+    
+    # Check if direct path intersects cylinder
+    intersects = line_intersects_cylinder(start, end, CYLINDER_CENTER, CYLINDER_RADIUS, CYLINDER_Z_MIN, CYLINDER_Z_MAX)
+    
+    if intersects:
+        print("Using avoidance waypoints")
+        # Generate avoidance waypoints
+        waypoints = generate_avoidance_waypoints(start, end, CYLINDER_CENTER, AVOIDANCE_RADIUS)
+        trajectory = create_spline_trajectory(start, end, waypoints, num_points)
+    else:
+        print("Direct spline path")
+        # Direct smooth path
+        trajectory = create_spline_trajectory(start, end, None, num_points)
+    
+    return trajectory
+
+def calculate_approach_point(centroid, normal, distance=APPROACH_DISTANCE):
+    """Calculate approach point at distance from centroid along normal"""
+    centroid = np.array(centroid)
+    normal = np.array(normal)
+    normal_normalized = normal / np.linalg.norm(normal)
+    approach_point = centroid + normal_normalized * distance
+    return approach_point.tolist()
+
+def plan_complete_path(start_position, target_leaves, center_point=None, circle_radius=None, num_circle_points=None):
+    """Plan complete trajectory using spline paths"""
+    if not target_leaves:
         return []
     
-    # Calculate positions on circle
-    circle_positions = calculate_circle_positions(center_point, circle_radius, num_circle_points)
+    path = []
+    current_position = start_position
     
-    # Initialize path with starting position
-    path = [{
-        "position": start_position,
-        "type": "via_point",
-        "comment": "Starting position"
-    }]
-    
-    # Find closest point on circle to starting position
-    start_pos_index = find_closest_point_index(circle_positions, start_position)
-    current_pos = circle_positions[start_pos_index]
-    
-    # Add entry point on circle
+    # Starting point
     path.append({
-        "position": current_pos,
-        "type": "via_point",
-        "comment": "Entry point on circle"
+        "position": start_position,
+        "type": "start", 
+        "comment": "Starting position"
     })
     
-    # For each target point (leaf)
-    for i, target_point in enumerate(target_points):
-        # Find closest point on circle to leaf
-        leaf_pos_index = find_closest_point_index(circle_positions, target_point)
-        leaf_circle_pos = circle_positions[leaf_pos_index]
+    # For each leaf
+    for i, leaf in enumerate(target_leaves):
+        centroid = leaf['centroid']
+        normal = leaf['normal']
+        leaf_id = leaf.get('id', i+1)
         
-        # Add path on circle to closest point
-        # Determine whether to go clockwise or counterclockwise (shortest)
-        clockwise_distance = (leaf_pos_index - start_pos_index) % len(circle_positions)
-        counterclockwise_distance = (start_pos_index - leaf_pos_index) % len(circle_positions)
+        # Calculate approach point
+        approach_point = calculate_approach_point(centroid, normal, APPROACH_DISTANCE)
         
-        if clockwise_distance <= counterclockwise_distance:
-            # Clockwise
-            for j in range(1, clockwise_distance + 1):
-                pos_index = (start_pos_index + j) % len(circle_positions)
-                path.append({
-                    "position": circle_positions[pos_index],
-                    "type": "via_point",
-                    "comment": f"Position {pos_index} on circle (toward leaf {i+1})"
-                })
-        else:
-            # Counterclockwise
-            for j in range(1, counterclockwise_distance + 1):
-                pos_index = (start_pos_index - j) % len(circle_positions)
-                path.append({
-                    "position": circle_positions[pos_index],
-                    "type": "via_point",
-                    "comment": f"Position {pos_index} on circle (toward leaf {i+1})"
-                })
+        # Plan spline trajectory to approach point
+        spline_to_approach = plan_spline_trajectory(current_position, approach_point, num_points=10)
         
-        # Use target_point directly (already at correct distance)
-        # For compatibility with plan_safe_path
-        leaf_position = target_point
-        
-        # Plan approach path to leaf
-        approach_path = plan_safe_path(leaf_circle_pos, target_point, leaf_position)
-        
-        # Add approach path (skip first point already on circle)
-        path.extend(approach_path[1:])
-        
-        # Update starting point for next leaf
-        start_pos_index = leaf_pos_index
-    
-    # ===== NEW PART: SAFE RETURN TO INITIAL POSITION =====
-    # Find closest point on circle to starting position
-    end_pos_index = find_closest_point_index(circle_positions, start_position)
-    
-    # Determine shortest path on circle to return to point near starting position
-    clockwise_distance = (end_pos_index - start_pos_index) % len(circle_positions)
-    counterclockwise_distance = (start_pos_index - end_pos_index) % len(circle_positions)
-    
-    print(f"Planning return via circle: current position {start_pos_index}, target point {end_pos_index}")
-    
-    if clockwise_distance <= counterclockwise_distance:
-        # Clockwise
-        print(f"Returning clockwise: {clockwise_distance} points")
-        for j in range(1, clockwise_distance + 1):
-            pos_index = (start_pos_index + j) % len(circle_positions)
+        # Add spline waypoints
+        for j, waypoint in enumerate(spline_to_approach[:-1]):
             path.append({
-                "position": circle_positions[pos_index],
+                "position": waypoint,
                 "type": "via_point",
-                "comment": f"Position {pos_index} on circle (returning)"
+                "comment": f"Spline to leaf {leaf_id}, point {j+1}"
             })
-    else:
-        # Counterclockwise
-        print(f"Returning counterclockwise: {counterclockwise_distance} points")
-        for j in range(1, counterclockwise_distance + 1):
-            pos_index = (start_pos_index - j) % len(circle_positions)
-            path.append({
-                "position": circle_positions[pos_index],
-                "type": "via_point",
-                "comment": f"Position {pos_index} on circle (returning)"
-            })
+        
+        # Approach point (photo position)
+        path.append({
+            "position": approach_point,
+            "type": "photo_point",
+            "comment": f"Photo position for leaf {leaf_id}",
+            "leaf_data": leaf
+        })
+        
+        # Fluorescence position (at centroid)
+        path.append({
+            "position": centroid,
+            "type": "fluoro_point",
+            "comment": f"Fluorescence position for leaf {leaf_id}",
+            "leaf_data": leaf
+        })
+        
+        # Return to approach point
+        path.append({
+            "position": approach_point,
+            "type": "via_point",
+            "comment": f"Return to approach for leaf {leaf_id}"
+        })
+        
+        current_position = approach_point
     
-    # Finally add return to starting position
+    # Return to start using spline
+    spline_to_start = plan_spline_trajectory(current_position, start_position, num_points=8)
+    
+    for j, waypoint in enumerate(spline_to_start[:-1]):
+        path.append({
+            "position": waypoint,
+            "type": "via_point",
+            "comment": f"Return spline, point {j+1}"
+        })
+    
+    # Final position
     path.append({
         "position": start_position,
         "type": "end",
@@ -194,184 +225,108 @@ def plan_complete_path(start_position, target_points, center_point, circle_radiu
     
     return path
 
-def visualize_path(path, points=None, target_point=None, save_path=None):
-    """
-    Visualize a 3D trajectory
-    
-    Args:
-        path: List of dictionaries describing the trajectory
-        points: Point cloud to display (optional)
-        target_point: Target point to display (optional)
-        save_path: Path to save image (optional)
-    """
-    # Create figure
-    fig = plt.figure(figsize=(10, 8))
-    ax = fig.add_subplot(111, projection='3d')
-    
-    # Extract path positions
-    positions = [p["position"] for p in path]
-    x = [p[0] for p in positions]
-    y = [p[1] for p in positions]
-    z = [p[2] for p in positions]
-    
-    # Display path
-    ax.plot(x, y, z, 'b-', linewidth=2, label="Path")
-    
-    # Display path points
-    for i, point in enumerate(path):
-        pos = point["position"]
-        if point["type"] == "via_point":
-            ax.scatter(pos[0], pos[1], pos[2], color='green', s=30)
-        elif point["type"] == "target":
-            ax.scatter(pos[0], pos[1], pos[2], color='red', s=50)
-            ax.text(pos[0], pos[1], pos[2], f"Target {i}", color='red')
-        elif point["type"] == "end":
-            ax.scatter(pos[0], pos[1], pos[2], color='purple', s=50)
-            ax.text(pos[0], pos[1], pos[2], "End", color='purple')
-    
-    # Display point cloud if provided
-    if points is not None:
-        ax.scatter(points[:, 0], points[:, 1], points[:, 2], color='gray', s=1, alpha=0.5)
-    
-    # Display target point if provided
-    if target_point is not None:
-        ax.scatter(target_point[0], target_point[1], target_point[2], color='orange', s=100)
-    
-    # Configure axes
-    ax.set_xlabel('X (m)')
-    ax.set_ylabel('Y (m)')
-    ax.set_zlabel('Z (m)')
-    ax.set_title('Path Visualization')
-    
-    # Adjust axis limits
-    max_range = max([
-        max(x) - min(x),
-        max(y) - min(y),
-        max(z) - min(z)
-    ])
-    mid_x = (max(x) + min(x)) / 2
-    mid_y = (max(y) + min(y)) / 2
-    mid_z = (max(z) + min(z)) / 2
-    ax.set_xlim(mid_x - max_range/2, mid_x + max_range/2)
-    ax.set_ylim(mid_y - max_range/2, mid_y + max_range/2)
-    ax.set_zlim(mid_z - max_range/2, mid_z + max_range/2)
-    
-    # Add legend
-    ax.legend()
-    
-    # Display or save figure
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"Figure saved: {save_path}")
-    else:
-        plt.show()
-    
-    plt.close(fig)
-
 def visualize_complete_path(path, points, leaf_points_list=None, leaf_normals_list=None, save_dir=None):
-    """
-    Visualize a complete trajectory with leaves
+    """Visualize spline trajectory with cylinder"""
     
-    Args:
-        path: List of dictionaries describing the trajectory
-        points: Global point cloud
-        leaf_points_list: List of leaf points (optional)
-        leaf_normals_list: List of leaf normals (optional)
-        save_dir: Directory to save images (optional)
-    """
-    # Create figure
-    fig = plt.figure(figsize=(12, 10))
-    ax = fig.add_subplot(111, projection='3d')
-    
-    # Extract path positions
     positions = [p["position"] for p in path]
-    x = [p[0] for p in positions]
-    y = [p[1] for p in positions]
-    z = [p[2] for p in positions]
     
-    # Display path
-    ax.plot(x, y, z, 'b-', linewidth=2, label="Complete path")
+    # Dual plot
+    fig = plt.figure(figsize=(16, 8))
     
-    # Display path points
-    for i, point in enumerate(path):
-        pos = point["position"]
-        if point["type"] == "via_point":
-            ax.scatter(pos[0], pos[1], pos[2], color='green', s=20)
-        elif point["type"] == "target":
-            ax.scatter(pos[0], pos[1], pos[2], color='red', s=50)
-            ax.text(pos[0], pos[1], pos[2], f"T{i}", color='red')
-        elif point["type"] == "end":
-            ax.scatter(pos[0], pos[1], pos[2], color='purple', s=50)
-            ax.text(pos[0], pos[1], pos[2], "End", color='purple')
+    # 3D view
+    ax1 = fig.add_subplot(121, projection='3d')
     
-    # Display global point cloud (subsampled for performance)
-    if len(points) > 5000:
-        # Subsample for performance
-        indices = np.random.choice(len(points), 5000, replace=False)
-        sampled_points = points[indices]
-        ax.scatter(sampled_points[:, 0], sampled_points[:, 1], sampled_points[:, 2], 
-                  color='gray', s=1, alpha=0.3, label="Point cloud")
-    else:
-        ax.scatter(points[:, 0], points[:, 1], points[:, 2], 
-                  color='gray', s=1, alpha=0.3, label="Point cloud")
+    # Cylinder 3D
+    theta = np.linspace(0, 2*np.pi, 50)
+    for i in range(0, 50, 3):
+        cx = CYLINDER_CENTER[0] + CYLINDER_RADIUS * np.cos(theta[i])
+        cy = CYLINDER_CENTER[1] + CYLINDER_RADIUS * np.sin(theta[i])
+        ax1.plot([cx, cx], [cy, cy], [CYLINDER_Z_MIN, CYLINDER_Z_MAX], 'r-', linewidth=2, alpha=0.7)
     
-    # Display leaf points if provided
-    if leaf_points_list is not None:
-        for i, leaf_points in enumerate(leaf_points_list):
-            if isinstance(leaf_points, list) and len(leaf_points) == 3:
-                # It's a single point (centroid)
-                ax.scatter(leaf_points[0], leaf_points[1], leaf_points[2], 
-                          color='orange', s=100, label=f"Leaf {i+1}" if i == 0 else "")
-            else:
-                # It's a set of points
-                ax.scatter(leaf_points[:, 0], leaf_points[:, 1], leaf_points[:, 2], 
-                          color='orange', s=10, alpha=0.7, label=f"Leaf {i+1}" if i == 0 else "")
+    cylinder_x = CYLINDER_CENTER[0] + CYLINDER_RADIUS * np.cos(theta)
+    cylinder_y = CYLINDER_CENTER[1] + CYLINDER_RADIUS * np.sin(theta)
+    ax1.plot(cylinder_x, cylinder_y, CYLINDER_Z_MIN, 'r-', linewidth=3, label='Cylinder (15cm)')
+    ax1.plot(cylinder_x, cylinder_y, CYLINDER_Z_MAX, 'r-', linewidth=3)
     
-    # Display leaf normals if provided
-    if leaf_normals_list is not None and leaf_points_list is not None:
-        for i, (leaf_points, leaf_normal) in enumerate(zip(leaf_points_list, leaf_normals_list)):
-            if isinstance(leaf_points, list) and len(leaf_points) == 3:
-                # It's a single point (centroid)
-                centroid = leaf_points
-            else:
-                # Calculate centroid
-                centroid = np.mean(leaf_points, axis=0)
-            
-            # Normalize normal
-            normal = leaf_normal / np.linalg.norm(leaf_normal)
-            
-            # Draw normal
-            ax.quiver(centroid[0], centroid[1], centroid[2], 
-                     normal[0], normal[1], normal[2], 
-                     color='red', length=0.05, arrow_length_ratio=0.3)
+    # Avoidance circle (25cm)
+    avoid_x = CYLINDER_CENTER[0] + AVOIDANCE_RADIUS * np.cos(theta)
+    avoid_y = CYLINDER_CENTER[1] + AVOIDANCE_RADIUS * np.sin(theta)
+    ax1.plot(avoid_x, avoid_y, 0, 'g--', linewidth=2, alpha=0.5, label='Avoidance circle (25cm)')
     
-    # Configure axes
-    ax.set_xlabel('X (m)')
-    ax.set_ylabel('Y (m)')
-    ax.set_zlabel('Z (m)')
-    ax.set_title('Complete planned trajectory', fontsize=16)
+    # Trajectory
+    ax1.plot([p[0] for p in positions], [p[1] for p in positions], [p[2] for p in positions], 
+            'b-', linewidth=3, label="Spline trajectory")
     
-    # Add legend
-    handles, labels = ax.get_legend_handles_labels()
-    # Remove duplicates
-    unique = [(h, l) for i, (h, l) in enumerate(zip(handles, labels)) if l not in labels[:i]]
-    ax.legend(*zip(*unique))
+    # Point cloud
+    if len(points) > 2000:
+        sample_indices = np.random.choice(len(points), 2000, replace=False)
+        display_points = points[sample_indices]
+        ax1.scatter(display_points[:, 0], display_points[:, 1], display_points[:, 2],
+                  c='gray', s=0.5, alpha=0.2)
     
-    # Adjust view
-    ax.view_init(elev=30, azim=45)
+    # Path points
+    for position, point_info in zip(positions, path):
+        if point_info["type"] == "photo_point":
+            ax1.scatter(position[0], position[1], position[2], color='blue', s=100, marker='s')
+        elif point_info["type"] == "fluoro_point":
+            ax1.scatter(position[0], position[1], position[2], color='red', s=100, marker='*')
     
-    # Display or save figure
+    ax1.set_xlabel('X (m)')
+    ax1.set_ylabel('Y (m)')
+    ax1.set_zlabel('Z (m)')
+    ax1.set_title('3D Spline Trajectory')
+    ax1.legend()
+    ax1.view_init(elev=25, azim=45)
+    
+    # Top view
+    ax2 = fig.add_subplot(122)
+    
+    # Cylinders top view
+    circle_inner = plt.Circle(CYLINDER_CENTER, CYLINDER_RADIUS, color='red', fill=False, linewidth=3, label='Cylinder (15cm)')
+    circle_outer = plt.Circle(CYLINDER_CENTER, AVOIDANCE_RADIUS, color='green', fill=False, linewidth=2, linestyle='--', label='Waypoint circle (25cm)')
+    ax2.add_patch(circle_inner)
+    ax2.add_patch(circle_outer)
+    
+    # Trajectory
+    ax2.plot([p[0] for p in positions], [p[1] for p in positions], 'b-', linewidth=3, label="Spline path")
+    
+    # Point cloud
+    if len(points) > 3000:
+        sample_indices = np.random.choice(len(points), 3000, replace=False)
+        display_points = points[sample_indices]
+        ax2.scatter(display_points[:, 0], display_points[:, 1], c='gray', s=0.3, alpha=0.1)
+    
+    # Path points
+    for position, point_info in zip(positions, path):
+        if point_info["type"] == "photo_point":
+            ax2.scatter(position[0], position[1], color='blue', s=100, marker='s')
+        elif point_info["type"] == "fluoro_point":
+            ax2.scatter(position[0], position[1], color='red', s=100, marker='*')
+        elif point_info["type"] == "start":
+            ax2.scatter(position[0], position[1], color='purple', s=120, marker='D')
+    
+    ax2.set_xlabel('X (m)')
+    ax2.set_ylabel('Y (m)')
+    ax2.set_title('Top View - Spline Strategy')
+    ax2.grid(True, alpha=0.3)
+    ax2.axis('equal')
+    ax2.legend()
+    
+    # Algorithm explanation
+    explanation = """SPLINE ALGORITHM:
+1. Check direct line intersection
+2. Generate waypoints on 25cm circle
+3. Cubic spline through waypoints
+4. Natural boundary conditions"""
+    
+    ax2.text(0.02, 0.98, explanation, transform=ax2.transAxes, fontsize=9,
+             verticalalignment='top', bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue", alpha=0.8))
+    
+    plt.tight_layout()
+    
     if save_dir:
-        save_path = os.path.join(save_dir, "complete_path.png")
+        save_path = os.path.join(save_dir, 'spline_trajectory.png')
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"Figure saved: {save_path}")
-        
-        # Also save top view
-        ax.view_init(elev=90, azim=0)
-        save_path = os.path.join(save_dir, "complete_path_top_view.png")
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"Top view saved: {save_path}")
-    else:
-        plt.show()
+        print(f"Spline visualization saved: {save_path}")
     
-    plt.close(fig)
+    plt.show()

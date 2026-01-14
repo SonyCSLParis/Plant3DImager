@@ -20,7 +20,7 @@ _config_loaded = False
 _defaults = {
     "TARGET_POINT": [0.375, 0.35, 0.30],
     "CENTER_POINT": [0.375, 0.35, 0.00],
-    "CIRCLE_RADIUS": 0.30,
+    "CIRCLE_RADIUS": 0.20,
     "NUM_POSITIONS": 80,
     "Z_OFFSET": 0.20,
     "ARDUINO_PORT": "/dev/ttyACM0",

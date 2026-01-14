@@ -46,6 +46,99 @@ def calculate_circle_positions(center=None, radius=None, num_positions=None):
     
     return positions
 
+def calculate_helix_positions(center=None, radius=None, num_positions=None, target_z=None):
+    """
+    Calculate positions on a helix with progressive Z variation
+    
+    Args:
+        center: Tuple (x, y, z) of helix center (default: CENTER_POINT)
+        radius: Helix radius (default: CIRCLE_RADIUS)
+        num_positions: Number of positions on the helix (default: NUM_POSITIONS)
+        target_z: Target Z height to reach progressively
+    
+    Returns:
+        List of tuples (x, y, z) representing positions on the helix
+    """
+    # Use default values if not specified
+    if center is None:
+        center = config.CENTER_POINT
+    
+    if radius is None:
+        radius = config.CIRCLE_RADIUS
+    
+    if num_positions is None:
+        num_positions = config.NUM_POSITIONS
+    
+    if target_z is None:
+        target_z = center[2]
+    
+    positions = []
+    start_z = center[2]
+    
+    for i in range(num_positions):
+        # Calculate angle in radians
+        angle = 2 * math.pi * i / num_positions
+        
+        # Calculate x and y coordinates
+        x = center[0] + radius * math.cos(angle)
+        y = center[1] + radius * math.sin(angle)
+        
+        # Progressive Z variation
+        z_progress = i / (num_positions - 1) if num_positions > 1 else 0
+        z = start_z + (target_z - start_z) * z_progress
+        
+        positions.append((x, y, z))
+    
+    return positions
+
+def calculate_spiral_to_target(center, radius, target_point, num_positions):
+    """
+    Calculate spiral trajectory from circle to target point
+    
+    Args:
+        center: Circle center (x, y, z)
+        radius: Initial radius
+        target_point: Target point (x, y, z)
+        num_positions: Number of waypoints
+    
+    Returns:
+        List of positions forming spiral to target
+    """
+    positions = []
+    
+    # Calculate target angle and distance from center
+    target_x, target_y, target_z = target_point
+    center_x, center_y, center_z = center
+    
+    # Target position relative to center
+    dx = target_x - center_x
+    dy = target_y - center_y
+    target_radius = math.sqrt(dx**2 + dy**2)
+    target_angle = math.atan2(dy, dx)
+    
+    # Ensure target angle is positive
+    if target_angle < 0:
+        target_angle += 2 * math.pi
+    
+    for i in range(num_positions):
+        progress = i / (num_positions - 1) if num_positions > 1 else 0
+        
+        # Spiral inward/outward to target radius
+        current_radius = radius + (target_radius - radius) * progress
+        
+        # Rotate toward target angle (shortest path)
+        angle_diff = target_angle
+        current_angle = angle_diff * progress
+        
+        # Calculate position
+        x = center_x + current_radius * math.cos(current_angle)
+        y = center_y + current_radius * math.sin(current_angle)
+        z = center_z + (target_z - center_z) * progress
+        
+        positions.append((x, y, z))
+    
+    return positions
+
 def find_closest_point_index(positions, reference_point):
     """
     Find the index of the point closest to the reference point

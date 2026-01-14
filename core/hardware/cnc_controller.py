@@ -97,6 +97,36 @@ class CNCController:
             print(f"Error during movement: {e}")
             return False
     
+    def travel(self, waypoints, wait=True):
+        """Execute optimized trajectory through multiple waypoints"""
+        if not self.initialized:
+            raise RuntimeError("CNC not initialized")
+        
+        try:
+            # Convert waypoints and invert Z coordinates
+            robot_waypoints = []
+            for waypoint in waypoints:
+                x, y, z = waypoint
+                robot_z = -z  # Invert Z for robot
+                robot_waypoints.append([x, y, robot_z])
+            
+            print(f"Executing trajectory with {len(waypoints)} waypoints...")
+            
+            # Execute trajectory
+            self.cnc.travel(robot_waypoints, speed=self.speed, sync=wait)
+            
+            # Update position if wait=True
+            if wait:
+                self.get_position()
+                print(f"Trajectory completed. Final position: X={self.current_position['x']:.3f}, "
+                      f"Y={self.current_position['y']:.3f}, Z={self.current_position['z']:.3f}")
+            
+            return True
+            
+        except Exception as e:
+            print(f"Error during trajectory execution: {e}")
+            return False
+    
     def check_movement_status(self, previous_position, tolerance=0.001):
         """Check if the CNC is still moving by comparing positions"""
         if not self.initialized:

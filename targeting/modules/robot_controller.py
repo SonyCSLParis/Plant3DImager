@@ -10,20 +10,11 @@ class RobotController:
     def __init__(self, cnc=None, camera=None, gimbal=None, fluo_sensor=None, output_dirs=None, speed=0.1, update_interval=0.1):
         """
         Initialize robot controller with optional fluorescence sensor support
-        
-        Args:
-            cnc: CNCController instance
-            camera: CameraController instance
-            gimbal: GimbalController instance
-            fluo_sensor: FluoController instance (optional)
-            output_dirs: Dictionary of output directories
-            speed: Movement speed (m/s)
-            update_interval: Update interval during movement (s)
         """
         self.cnc = cnc
         self.camera = camera
         self.gimbal = gimbal
-        self.fluo_sensor = fluo_sensor  # Can be None
+        self.fluo_sensor = fluo_sensor
         self.speed = speed
         self.update_interval = update_interval
         
@@ -42,201 +33,186 @@ class RobotController:
         self.fluo_available = fluo_sensor is not None
         
         if self.initialized:
-            print("Robot controller successfully initialized.")
+            print("Robot controller initialized.")
             if self.fluo_available:
-                print("Fluorescence sensor available for measurements.")
+                print("Fluorescence sensor available.")
             else:
-                print("No fluorescence sensor - photo-only mode.")
+                print("Photo-only mode.")
         else:
-            print("Robot controller partially initialized - some components missing.")
+            print("Robot controller partially initialized.")
+    
+    def _segment_path_by_actions(self, path):
+        """Segment trajectory by action points (photo/fluoro)"""
+        segments = []
+        action_indices = []
+        
+        # Find action indices
+        for i, point_info in enumerate(path):
+            if point_info["type"] in ["photo_point", "fluoro_point"]:
+                action_indices.append(i)
+        
+        if not action_indices:
+            return [path]
+        
+        # Create segments
+        start_idx = 0
+        
+        for action_idx in action_indices:
+            # Segment from start to action (inclusive)
+            segment = path[start_idx:action_idx + 1]
+            segments.append(segment)
+            start_idx = action_idx
+        
+        # Final segment from last action to end
+        if start_idx < len(path) - 1:
+            final_segment = path[start_idx:]
+            segments.append(final_segment)
+        
+        return segments
+    
+    def _execute_segment(self, segment):
+        """Execute trajectory segment using travel()"""
+        if len(segment) <= 1:
+            return True
+        
+        waypoints = [point_info["position"] for point_info in segment]
+        return self.cnc.travel(waypoints, wait=True)
+    
+    def _execute_photo_actions(self, point_info, auto_photo, stabilization_time):
+        """Execute photo actions at photo_point"""
+        leaf_data = point_info.get("leaf_data", {})
+        leaf_centroid = leaf_data.get("centroid")
+        leaf_id = leaf_data.get("id")
+        
+        if not leaf_centroid:
+            print("No leaf centroid data for photo point")
+            return False
+        
+        final_pos = self.cnc.get_position()
+        
+        print(f"\n--- Photo position for leaf {leaf_id} ---")
+        print(f"Orienting toward centroid: {leaf_centroid}")
+        
+        # Orient gimbal toward leaf
+        success = self.gimbal.aim_at_target(final_pos, leaf_centroid, wait=True, invert_tilt=True)
+        if not success:
+            print("Error orienting toward leaf")
+            return False
+        
+        # Stabilization
+        print(f"Stabilizing for {stabilization_time} seconds...")
+        time.sleep(stabilization_time)
+        
+        # Take photo
+        if auto_photo:
+            timestamp = time.strftime("%Y%m%d-%H%M%S")
+            filename = f"leaf_{leaf_id}_{timestamp}.jpg"
+            
+            camera_pose = {
+                'x': final_pos['x'],
+                'y': final_pos['y'],
+                'z': final_pos['z'],
+                'pan_angle': self.gimbal.current_pan,
+                'tilt_angle': self.gimbal.current_tilt
+            }
+            
+            photo_path, _ = self.camera.take_photo(filename, camera_pose)
+            if photo_path:
+                print(f"Photo taken: {photo_path}")
+        
+        # Rotate tilt 180° for fluorescence preparation
+        print("Rotating tilt 180° for fluorescence preparation...")
+        success = self.gimbal.send_command(0, 180, wait_for_goal=True)
+        if not success:
+            print("Warning: Could not rotate tilt for fluorescence preparation")
+        
+        return True
+    
+    def _execute_fluoro_actions(self, point_info):
+        """Execute fluorescence actions at fluoro_point"""
+        leaf_data = point_info.get("leaf_data", {})
+        leaf_id = leaf_data.get("id")
+        
+        final_pos = self.cnc.get_position()
+        
+        print(f"\n--- Fluorescence measurement for leaf {leaf_id} ---")
+        
+        if self.fluo_available:
+            print("Performing fluorescence measurement...")
+            measurements = self.fluo_sensor.measure_simple()
+            
+            if measurements:
+                fluo_data = self.save_fluorescence_data(
+                    measurements, leaf_id, final_pos, 0
+                )
+                print(f"Fluorescence completed: {len(measurements)} points")
+                print(f"Average: {np.mean(measurements):.6f}")
+            else:
+                print("Error: No fluorescence data received")
+        else:
+            print("No fluorescence sensor available")
+        
+        return True
+    
+    def _execute_post_fluoro_actions(self, next_point_info):
+        """Execute post-fluorescence actions (tilt reset)"""
+        print("Rotating tilt back to normal position...")
+        success = self.gimbal.send_command(0, -180, wait_for_goal=True)
+        if success:
+            print("Tilt rotated back successfully")
+        else:
+            print("Warning: Could not rotate tilt back")
+        
+        return True
     
     def execute_path(self, path, leaf_centroids=None, leaf_ids=None, auto_photo=True, stabilization_time=3.0):
         """
-        Execute a complete trajectory with optional fluorescence measurements
+        Execute complete trajectory with curved paths and full measurement protocol
         
         Args:
-            path: List of dictionaries describing the trajectory
-            leaf_centroids: List of leaf centroid positions
-            leaf_ids: List of leaf IDs corresponding to centroids
-            auto_photo: Take photos automatically at target points
-            stabilization_time: Wait time for stabilization before photo (in seconds)
-        
+            path: List of dictionaries with curved trajectory
+            leaf_centroids: Ignored (data in path)
+            leaf_ids: Ignored (data in path) 
+            auto_photo: Take photos automatically
+            stabilization_time: Stabilization time
+            
         Returns:
-            True if execution is successful, False otherwise
+            True if successful
         """
         if not self.initialized:
-            print("Error: Robot not fully initialized.")
+            print("Error: Robot not initialized.")
             return False
         
         try:
-            # Variables to track leaves and fluorescence data
-            current_leaf_index = 0
-            photos_taken = []
-            fluorescence_data = []
+            # Segment trajectory by action points
+            segments = self._segment_path_by_actions(path)
+            print(f"Trajectory segmented into {len(segments)} parts")
             
-            # Identify target points
-            target_indices = []
-            for i, point_info in enumerate(path):
-                if point_info["type"] == "target":
-                    target_indices.append(i)
-            
-            # Follow path
-            for i, point_info in enumerate(path):
-                position = point_info["position"]
-                point_type = point_info["type"]
-                comment = point_info.get("comment", "")
+            for i, segment in enumerate(segments):
+                print(f"\n--- Executing segment {i+1}/{len(segments)} ---")
                 
-                print(f"\n--- Step {i+1}/{len(path)}: {point_type} ---")
-                if comment:
-                    print(f"Info: {comment}")
-                
-                # Move to this point
-                success = self.cnc.move_to(
-                    position[0], position[1], position[2], wait=True
-                )
-                
-                if not success:
-                    print(f"Error during movement to step {i+1}")
-                    continue
-                
-                # Check if we're at last intermediate point before a target point
-                if point_type == "via_point" and i+1 < len(path) and path[i+1]["type"] == "target":
-                    next_target_index = i + 1
-                    next_leaf_index = target_indices.index(next_target_index)
-                    
-                    if leaf_centroids is not None and next_leaf_index < len(leaf_centroids):
-                        print(f"\n--- Orienting toward leaf at last intermediate point ---")
-                        
-                        final_pos = self.cnc.get_position()
-                        next_leaf_centroid = leaf_centroids[next_leaf_index]
-                        
-                        print(f"DEBUG: Orienting toward centroid: {next_leaf_centroid}")
-                        
-                        success = self.gimbal.aim_at_target(final_pos, next_leaf_centroid, wait=True, invert_tilt=True)
-                        
-                        if not success:
-                            print("Error orienting toward leaf")
-                        else:
-                            print("Camera successfully oriented toward leaf")
-                
-                # If it's a target point and we have leaf centroids
-                if point_type == "target" and leaf_centroids is not None and current_leaf_index < len(leaf_centroids):
-                    leaf_centroid = leaf_centroids[current_leaf_index]
-                    leaf_id = leaf_ids[current_leaf_index] if leaf_ids and current_leaf_index < len(leaf_ids) else None
-                    
-                    print(f"\n--- Targeting leaf {leaf_id if leaf_id is not None else current_leaf_index + 1} ---")
-                    
-                    final_pos = self.cnc.get_position()
-                    
-                    print(f"DEBUG: Fine adjustment toward centroid: {leaf_centroid}")
-                    
-                    success = self.gimbal.aim_at_target(final_pos, leaf_centroid, wait=True, invert_tilt=True)
-                    
+                # Execute segment with travel()
+                if len(segment) > 1:
+                    success = self._execute_segment(segment)
                     if not success:
-                        print("Error orienting toward leaf")
-                        current_leaf_index += 1
+                        print(f"Error executing segment {i+1}")
                         continue
+                
+                # Check segment end point type for actions
+                last_point = segment[-1]
+                point_type = last_point["type"]
+                
+                if point_type == "photo_point":
+                    self._execute_photo_actions(last_point, auto_photo, stabilization_time)
                     
-                    # Pause for stabilization
-                    print(f"Stabilizing for {stabilization_time} seconds...")
-                    time.sleep(stabilization_time)
+                elif point_type == "fluoro_point":
+                    self._execute_fluoro_actions(last_point)
                     
-                    # Take photo based on auto_photo setting
-                    photo_taken = False
-                    if auto_photo:
-                        timestamp = time.strftime("%Y%m%d-%H%M%S")
-                        if leaf_id is not None:
-                            filename = f"leaf_{leaf_id}_{timestamp}.jpg"
-                        else:
-                            filename = f"leaf_target_{current_leaf_index+1}_{timestamp}.jpg"
-                        
-                        camera_pose = {
-                            'x': final_pos['x'],
-                            'y': final_pos['y'],
-                            'z': final_pos['z'],
-                            'pan_angle': self.gimbal.current_pan,
-                            'tilt_angle': self.gimbal.current_tilt
-                        }
-                        
-                        photo_path, _ = self.camera.take_photo(filename, camera_pose)
-                        
-                        if photo_path:
-                            photos_taken.append((photo_path, leaf_id))
-                            photo_taken = True
-                            print(f"Photo taken: {photo_path}")
-                    else:
-                        # Manual photo confirmation
-                        take_photo = input("\nTake a photo? (y/n): ").lower()
-                        if take_photo == 'y':
-                            timestamp = time.strftime("%Y%m%d-%H%M%S")
-                            if leaf_id is not None:
-                                filename = f"leaf_{leaf_id}_{timestamp}.jpg"
-                            else:
-                                filename = f"leaf_target_{current_leaf_index+1}_{timestamp}.jpg"
-                            
-                            camera_pose = {
-                                'x': final_pos['x'],
-                                'y': final_pos['y'],
-                                'z': final_pos['z'],
-                                'pan_angle': self.gimbal.current_pan,
-                                'tilt_angle': self.gimbal.current_tilt
-                            }
-                            
-                            photo_path, _ = self.camera.take_photo(filename, camera_pose)
-                            
-                            if photo_path:
-                                photos_taken.append((photo_path, leaf_id))
-                                photo_taken = True
-                                print(f"Photo taken: {photo_path}")
-                    
-                    # Fluorescence measurement if sensor available
-                    if self.fluo_available:
-                        print("\n=== FLUORESCENCE MEASUREMENT ===")
-                        
-                        print("Step 1/4: Rotating camera 180 degrees for fluorescence measurement...")
-                        success = self.gimbal.send_command(0, 180, wait_for_goal=True)
-                        
-                        if not success:
-                            print("❌ Error: Could not rotate camera for fluorescence measurement")
-                        else:
-                            print("✅ Camera rotated successfully")
-                            
-                            print("Step 2/4: Performing fluorescence measurement...")
-                            measurements = self.fluo_sensor.measure_simple()
-                            
-                            if measurements:
-                                print("Step 3/4: Saving fluorescence data...")
-                                fluo_data = self.save_fluorescence_data(
-                                    measurements, leaf_id, final_pos, current_leaf_index
-                                )
-                                fluorescence_data.append(fluo_data)
-                                
-                                print(f"✅ Fluorescence measurement completed: {len(measurements)} points")
-                                print(f"   Average fluorescence: {np.mean(measurements):.6f}")
-                            else:
-                                print("❌ Error: No fluorescence data received")
-                            
-                            print("Step 4/4: Rotating camera back to original position...")
-                            success = self.gimbal.send_command(0, -180, wait_for_goal=True)
-                            if success:
-                                print("✅ Camera rotated back to original position")
-                            else:
-                                print("❌ Warning: Could not rotate camera back")
-                    
-                    # Increment leaf index
-                    current_leaf_index += 1
-            
-            # Summary
-            if photos_taken:
-                print("\n=== PHOTOS SUMMARY ===")
-                for i, (path, leaf_id) in enumerate(photos_taken):
-                    print(f"{i+1}. Leaf {leaf_id if leaf_id is not None else '?'}: {path}")
-            
-            if fluorescence_data and self.fluo_available:
-                print("\n=== FLUORESCENCE SUMMARY ===")
-                for i, data in enumerate(fluorescence_data):
-                    avg_fluoro = np.mean(data['measurements'])
-                    print(f"{i+1}. Leaf {data['leaf_id']}: {len(data['measurements'])} points, avg = {avg_fluoro:.6f}")
+                    # Check if next segment exists and reset tilt
+                    if i + 1 < len(segments):
+                        next_segment = segments[i + 1]
+                        if next_segment:
+                            self._execute_post_fluoro_actions(next_segment[0])
             
             return True
             
@@ -247,9 +223,7 @@ class RobotController:
             return False
     
     def save_fluorescence_data(self, measurements, leaf_id, position, leaf_index):
-        """
-        Save fluorescence measurements to JSON file
-        """
+        """Save fluorescence measurements to JSON file"""
         timestamp = datetime.now().isoformat()
         
         fluo_data = {
@@ -275,7 +249,7 @@ class RobotController:
             }
         }
         
-        # Save to file if analysis directory exists
+        # Save to file
         if self.analysis_dir:
             filename = f"fluorescence_leaf_{fluo_data['leaf_id']}_{timestamp.replace(':', '-')}.json"
             filepath = os.path.join(self.analysis_dir, filename)
@@ -283,19 +257,11 @@ class RobotController:
             try:
                 with open(filepath, 'w') as f:
                     json.dump(fluo_data, f, indent=2)
-                print(f"   Fluorescence data saved: {filepath}")
+                print(f"Fluorescence data saved: {filepath}")
             except Exception as e:
-                print(f"   Warning: Could not save fluorescence data: {e}")
+                print(f"Warning: Could not save fluorescence data: {e}")
         
         return fluo_data
-    
-    def normalize_angle_difference(self, delta):
-        """Normalize angle difference to take shortest path"""
-        if delta > 180:
-            delta -= 360
-        elif delta < -180:
-            delta += 360
-        return delta
     
     def shutdown(self):
         """Properly shut down the robot"""
@@ -303,29 +269,17 @@ class RobotController:
         
         if self.cnc is not None:
             try:
-                print("Moving to position (0, 0, 0)...")
-                self.cnc.move_to(0, 0, 0, wait=True)
-                
-                print("Returning to home position (homing)...")
+                print("Moving to (0,0,0) and homing...")
+                self.cnc.move_to(0, 0, 0)
                 self.cnc.home()
-                
             except Exception as e:
                 print(f"Error during homing: {e}")
         
-        # Camera reset
         if self.gimbal is not None:
             try:
-                print("Resetting camera to initial position (0,0)...")
+                print("Resetting camera position...")
                 self.gimbal.reset_position()
             except Exception as e:
                 print(f"Error resetting camera: {e}")
-        
-        # Fluorescence sensor cleanup (if needed)
-        if self.fluo_sensor is not None:
-            try:
-                # Most RCom devices don't need explicit shutdown
-                pass
-            except Exception as e:
-                print(f"Error shutting down fluorescence sensor: {e}")
         
         return True

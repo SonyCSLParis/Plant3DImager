@@ -28,9 +28,9 @@ from core.data.storage_manager import StorageManager
 from targeting.modules.leaf_analyzer import calculate_adaptive_radius, build_connectivity_graph
 from targeting.modules.leaf_analyzer import detect_communities_louvain_multiple, extract_leaf_data_from_communities
 from targeting.modules.interactive_selector import select_leaf_with_matplotlib
-from targeting.modules.path_planner import plan_safe_path, plan_complete_path
+from targeting.modules.path_planner import plan_complete_path
 from targeting.modules.robot_controller import RobotController
-from targeting.modules.visualization import visualize_path, visualize_complete_path
+from targeting.modules.visualization import visualize_complete_path
 
 # Health status calculation based on fluorescence
 HEALTH_THRESHOLDS = {
@@ -255,43 +255,6 @@ class LeafTargeting:
             print(f"Leaf {leaf.get('id', '?')}: fluor={mock_fluorescence_mean:.4f} → {leaf['health_status']}")
         
         return
-        
-        # =======================================================================
-        # VRAIE LOGIQUE (COMMENTÉE) - À utiliser avec de vraies mesures 
-        # =======================================================================
-        """
-        # Si pas de capteur fluo, utiliser des valeurs aléatoires
-        if not self.fluo_sensor:
-            print("No fluorescence sensor - using mock data")
-            for leaf in self.leaves_data:
-                # Mock: valeurs aléatoires dans la gamme typique
-                mock_measurements = [0.005 + np.random.random() * 0.025 for _ in range(20)]
-                mean_fluor = np.mean(mock_measurements)
-                leaf["fluorescence_mean"] = mean_fluor
-                leaf["health_status"] = calculate_health_from_fluorescence(mean_fluor)
-            return
-        
-        # Avec capteur : utiliser vraies données 
-        for leaf in self.leaves_data:
-            try:
-                # TODO: Récupérer vraies mesures du capteur pour cette feuille
-                # measurements = self.get_fluorescence_measurements_for_leaf(leaf['id'])
-                # mean_fluor = np.mean(measurements)
-                
-                # Pour l'instant, utiliser mock data même avec capteur
-                mock_measurements = [0.005 + np.random.random() * 0.025 for _ in range(20)]
-                mean_fluor = np.mean(mock_measurements)
-                
-                leaf["fluorescence_mean"] = mean_fluor
-                leaf["health_status"] = calculate_health_from_fluorescence(mean_fluor)
-                
-                print(f"Leaf {leaf.get('id', '?')}: fluor={mean_fluor:.4f} → {leaf['health_status']}")
-                
-            except Exception as e:
-                print(f"Error calculating health for leaf {leaf.get('id', '?')}: {e}")
-                leaf["fluorescence_mean"] = 0.015  # Fallback
-                leaf["health_status"] = "Normal"
-        """
     
     def run_targeting(self):
         """Execute the complete targeting process"""
@@ -350,7 +313,7 @@ class LeafTargeting:
                 print("No leaves selected. Ending program.")
                 return True
             
-            # 10-11. Path planning and visualization (same as before)
+            # 10-11. Path planning and visualization
             print("\n=== 10. Planning complete trajectory ===")
             current_position = [0, 0, 0]
             
@@ -358,12 +321,7 @@ class LeafTargeting:
                 pos = self.cnc.get_position()
                 current_position = [pos['x'], pos['y'], pos['z']]
             
-            target_points = [leaf["target_point"] for leaf in self.selected_leaves]
-            
-            complete_path = plan_complete_path(
-                current_position, target_points, config.CENTER_POINT, config.CIRCLE_RADIUS, 
-                config.NUM_POSITIONS
-            )
+            complete_path = plan_complete_path(current_position, self.selected_leaves)
             
             print("\n=== 11. Visualizing complete trajectory ===")
             
@@ -390,7 +348,7 @@ class LeafTargeting:
                 print("\nSimulation mode: Program complete.")
                 return True
             
-            # 12. Execute trajectory with unified photo/fluorescence logic
+            # 12. Execute trajectory with curved paths
             print("\n=== 12. Executing trajectory ===")
             
             if self.fluo_sensor:
@@ -398,14 +356,9 @@ class LeafTargeting:
             else:
                 print("📷 Photo-only mode")
             
-            leaf_centroids = [leaf['centroid'] for leaf in self.selected_leaves]
-            leaf_ids = [leaf['id'] for leaf in self.selected_leaves]
-            
             success = self.robot.execute_path(
                 complete_path,
-                leaf_centroids=leaf_centroids,
-                leaf_ids=leaf_ids,
-                auto_photo=self.take_photos,  # Use unified photo logic
+                auto_photo=self.take_photos,
                 stabilization_time=config.STABILIZATION_TIME
             )
             

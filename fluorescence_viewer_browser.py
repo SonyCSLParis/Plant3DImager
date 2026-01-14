@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import dash
-from dash import html, dcc, Input, Output
+from dash import html, dcc, Input, Output, State, callback_context
+from dash.exceptions import PreventUpdate
 import plotly.graph_objects as go
 import plotly.express as px
 import json
@@ -10,8 +11,6 @@ from pathlib import Path
 import base64
 import time
 import glob
-
-app = dash.Dash(__name__)
 
 app = dash.Dash(__name__)
 
@@ -85,9 +84,65 @@ def find_latest_targeting_session():
     print(f"📂 Répertoire de session trouvé: {latest_dir}")
     return Path(latest_dir)
 
-def load_targeting_data():
+def find_all_targeting_sessions():
+    """Trouve tous les répertoires de session de targeting triés par date"""
+    base_pattern = "results/leaf_targeting/leaf_analysis_*"
+    session_dirs = glob.glob(base_pattern)
+    
+    if not session_dirs:
+        return []
+    
+    # Trier par nom (timestamp) décroissant
+    session_dirs.sort(reverse=True)
+    
+    sessions = []
+    for session_dir in session_dirs:
+        session_path = Path(session_dir)
+        
+        # Extraire la date du nom du répertoire
+        session_name = session_path.name
+        try:
+            # Format: leaf_analysis_20251211-134611
+            date_part = session_name.split('_')[-1]  # 20251211-134611
+            date_str = date_part[:8]  # 20251211
+            time_str = date_part[9:]  # 134611
+            
+            # Convertir en format lisible
+            from datetime import datetime
+            dt = datetime.strptime(f"{date_str}-{time_str}", "%Y%m%d-%H%M%S")
+            formatted_date = dt.strftime("%d/%m/%Y à %H:%M")
+            
+        except:
+            formatted_date = session_name
+        
+        # Compter les feuilles dans la session
+        try:
+            leaves_file = session_path / "analysis" / "leaves_data.json"
+            if leaves_file.exists():
+                with open(leaves_file, 'r') as f:
+                    leaves_data = json.load(f)
+                    leaf_count = len(leaves_data.get('leaves', []))
+            else:
+                leaf_count = 0
+        except:
+            leaf_count = 0
+            
+        sessions.append({
+            'path': str(session_path),
+            'name': session_name,
+            'date': formatted_date,
+            'leaf_count': leaf_count
+        })
+    
+    return sessions
+
+def load_targeting_data(session_dir=None):
     """Charge toutes les données d'une session de targeting"""
-    session_dir = find_latest_targeting_session()
+    if session_dir is None:
+        session_dir = find_latest_targeting_session()
+    else:
+        session_dir = Path(session_dir)
+        
     if not session_dir:
         return None
     
@@ -135,7 +190,7 @@ def load_fluorescence_data_for_leaf(session_dir, leaf_id):
     
     if not fluo_files:
         print(f"⚠️ Pas de données fluorescence pour feuille {leaf_id}")
-        return [], {}
+        return [], {}, {}
     
     # Prendre le fichier le plus récent
     fluo_file = sorted(fluo_files)[-1]
@@ -160,7 +215,7 @@ def load_fluorescence_data_for_leaf(session_dir, leaf_id):
         
     except Exception as e:
         print(f"❌ Erreur chargement fluorescence feuille {leaf_id}: {e}")
-        return [], {}
+        return [], {}, {}
 
 def load_pointcloud_with_targeting(session_dir, leaves_data, visited_leaves):
     """Charge le point cloud et identifie les feuilles visitées"""
@@ -348,14 +403,21 @@ if targeting_data:
     leaves_data = targeting_data["leaves_data"] 
     visited_leaves = targeting_data["visited_leaves"]
     
-    # Charger données pour affichage (première feuille par défaut)
-    current_leaf_id = visited_leaves[0] if visited_leaves else 1
-    time_data, fluor_data, fluor_config = load_fluorescence_data_for_leaf(session_dir, current_leaf_id)
+    # Ne pas pré-charger les données de feuille - attendre sélection utilisateur
+    current_leaf_id = None
     pc_x, pc_y, pc_z, pc_colors, pc_sizes = load_pointcloud_with_targeting(session_dir, leaves_data, visited_leaves)
-    leaf_info = get_leaf_info_for_display(leaves_data, visited_leaves)
-    leaf_image_src = load_leaf_image_for_display(session_dir, visited_leaves)
     
-    print(f"✅ Données chargées pour {len(visited_leaves)} feuilles visitées")
+    # États par défaut "Aucune données chargées"
+    time_data, fluor_data, fluor_config = [], [], {}
+    leaf_info = {
+        "leaf_id": "⌀",
+        "centroid": "Aucune feuille sélectionnée",
+        "health_status": "N/A",
+        "analysis_date": "N/A"
+    }
+    leaf_image_src = None
+    
+    print(f"✅ Données chargées pour {len(visited_leaves)} feuilles visitées - En attente de sélection utilisateur")
 else:
     # Fallback données mock
     print("⚠️ Aucune donnée de targeting, utilisation données mock")
@@ -391,6 +453,104 @@ app.layout = html.Div([
                 'fontSize': '28px',
                 'textShadow': '1px 1px 2px rgba(0,0,0,0.1)'
             }),
+    
+    # Bouton sélecteur de session
+    html.Div([
+        html.Button(
+            "📁 Changer de Session", 
+            id='open-session-modal', 
+            style={
+                'backgroundColor': '#4CAF50', 
+                'color': 'white', 
+                'border': 'none',
+                'padding': '10px 20px',
+                'borderRadius': '5px',
+                'cursor': 'pointer',
+                'fontSize': '14px',
+                'margin': '0 10px 20px 0'
+            }
+        ),
+        html.Span(id='current-session-info', 
+                 children=f"Session actuelle : {targeting_data['session_dir'].name if targeting_data else 'Aucune'}", 
+                 style={'color': '#666', 'fontSize': '12px', 'fontStyle': 'italic'})
+    ], style={'textAlign': 'center', 'marginBottom': '10px'}),
+    
+    # Modal pour sélection de session
+    html.Div([
+        html.Div([
+            html.Div([
+                html.H3("📋 Sélectionner une Session", style={'textAlign': 'center', 'marginBottom': '20px'}),
+                
+                # Zone scrollable avec les sessions
+                html.Div([
+                    dcc.RadioItems(
+                        id='session-selector',
+                        options=[],  # Sera rempli par callback
+                        value=None,
+                        labelStyle={'display': 'block', 'margin': '12px 0', 'padding': '8px', 'border': '1px solid #ddd', 'borderRadius': '5px', 'backgroundColor': '#f9f9f9'}
+                    )
+                ], style={
+                    'max-height': '400px',
+                    'overflow-y': 'auto',
+                    'padding': '10px',
+                    'border': '1px solid #ddd',
+                    'border-radius': '5px',
+                    'backgroundColor': '#fff'
+                }),
+                
+                # Boutons du modal
+                html.Div([
+                    html.Button(
+                        "Annuler", 
+                        id='close-session-modal', 
+                        style={
+                            'backgroundColor': '#f44336', 
+                            'color': 'white', 
+                            'border': 'none',
+                            'padding': '10px 20px',
+                            'borderRadius': '5px',
+                            'cursor': 'pointer',
+                            'margin': '0 10px 0 0'
+                        }
+                    ),
+                    html.Button(
+                        "Charger Session", 
+                        id='load-selected-session', 
+                        style={
+                            'backgroundColor': '#4CAF50', 
+                            'color': 'white', 
+                            'border': 'none',
+                            'padding': '10px 20px',
+                            'borderRadius': '5px',
+                            'cursor': 'pointer'
+                        }
+                    ),
+                ], style={'textAlign': 'center', 'marginTop': '20px'})
+                
+            ], style={
+                'backgroundColor': '#fff',
+                'padding': '30px',
+                'borderRadius': '10px',
+                'boxShadow': '0 4px 20px rgba(0,0,0,0.3)',
+                'max-width': '600px',
+                'width': '90%'
+            })
+        ], style={
+            'position': 'fixed',
+            'top': '0',
+            'left': '0',
+            'width': '100%',
+            'height': '100%',
+            'backgroundColor': 'rgba(0,0,0,0.5)',
+            'display': 'flex',
+            'justifyContent': 'center',
+            'alignItems': 'center',
+            'zIndex': '1000'
+        })
+    ], id='session-modal', style={'display': 'none'}),
+    
+    # Signal invisible pour déclencher la mise à jour des callbacks
+    html.Div(id='session-changed-signal', style={'display': 'none'}, children='0'),
     
     html.Div([
         # Zone principale - Point Cloud (plus étroite)
@@ -430,10 +590,9 @@ app.layout = html.Div([
             html.Div([
                 html.H4("Informations Feuille", style={'marginBottom': '10px', 'fontSize': '14px'}),
                 html.Div([
-                    html.P(f"ID: {leaf_info['leaf_id']}", style={'margin': '5px 0', 'fontSize': '12px'}),
-                    html.P(f"Centroïde: {leaf_info['centroid']}", style={'margin': '5px 0', 'fontSize': '12px'}),
-                    html.P(f"État: {leaf_info['health_status']}", style={'margin': '5px 0', 'fontSize': '12px'}),
-                    html.P(f"Date: {leaf_info['analysis_date']}", style={'margin': '5px 0', 'fontSize': '12px'})
+                    html.Div("⌀ Aucune feuille sélectionnée", 
+                            style={'textAlign': 'center', 'color': '#666', 'fontSize': '12px', 
+                                   'padding': '20px', 'fontStyle': 'italic'})
                 ], id='leaf-info-content')
             ], style={
                 'backgroundColor': '#f8f9fa', 
@@ -449,34 +608,16 @@ app.layout = html.Div([
             html.Div([
                 html.H4("Image Feuille", style={'marginBottom': '10px', 'fontSize': '14px'}),
                 html.Div([
-                    html.Img(
-                        src=leaf_image_src if leaf_image_src else "",
+                    html.Div(
+                        "⌀ Aucune image chargée",
                         style={
-                            'width': '100%',
-                            'height': 'auto',
-                            'maxHeight': '160px',
-                            'aspectRatio': '16/9',
-                            'objectFit': 'contain',
-                            'borderRadius': '5px',
-                            'backgroundColor': '#e9ecef'
+                            'height': '160px', 'backgroundColor': '#f5f5f5', 'display': 'flex',
+                            'alignItems': 'center', 'justifyContent': 'center',
+                            'borderRadius': '5px', 'fontSize': '12px', 'color': '#666',
+                            'border': '2px dashed #ccc', 'fontStyle': 'italic'
                         }
-                    ) if leaf_image_src else html.Div("Image non trouvée", style={
-                        'height': '160px',
-                        'backgroundColor': '#e9ecef',
-                        'display': 'flex',
-                        'alignItems': 'center',
-                        'justifyContent': 'center',
-                        'borderRadius': '5px',
-                        'color': '#6c757d',
-                        'fontSize': '12px',
-                        'aspectRatio': '16/9'
-                    })
-                ], id='leaf-image-content', style={
-                    'height': '160px',
-                    'display': 'flex',
-                    'alignItems': 'center',
-                    'justifyContent': 'center'
-                })
+                    )
+                ], id='leaf-image-content')
             ], style={
                 'flex': '1',
                 'border': '1px solid #000',  # Bordure noire fine
@@ -504,19 +645,20 @@ app.layout = html.Div([
     html.Div([
         dcc.Graph(
             id='fluorescence-chart',
-            figure=go.Figure(data=[go.Scatter(
-                x=time_data, 
-                y=fluor_data,
-                mode='lines+markers',
-                name='Fluorescence',
-                line=dict(color='green', width=3)
-            )]).update_layout(
-                title=f"Mesure Fluorescence - {fluor_config.get('name', f'Feuille {current_leaf_id if targeting_data else 1}')}",
+            figure=go.Figure().update_layout(
+                title="⌀ Aucune données de fluorescence chargées",
                 xaxis_title="Temps (s)",
-                yaxis_title="Intensité",
+                yaxis_title="Intensité", 
                 margin=dict(l=50, r=50, b=50, t=50),
+                showlegend=False,
                 plot_bgcolor='white',
-                height=280
+                height=280,
+                annotations=[{
+                    'text': 'Cliquez sur une feuille dans le point cloud<br>pour afficher ses données de fluorescence',
+                    'xref': 'paper', 'yref': 'paper',
+                    'x': 0.5, 'y': 0.5, 'xanchor': 'center', 'yanchor': 'middle',
+                    'showarrow': False, 'font': {'size': 14, 'color': '#666'}
+                }]
             )
         )
     ], style={
@@ -580,7 +722,7 @@ app_data = {
     'session_dir': session_dir,
     'leaves_data': leaves_data,
     'visited_leaves': visited_leaves,
-    'current_leaf_id': current_leaf_id if targeting_data else 1
+    'current_leaf_id': current_leaf_id if targeting_data else None  # None au lieu de 1
 }
 
 def find_clicked_leaf(click_data, visited_leaves, leaves_data):
@@ -654,12 +796,118 @@ def get_leaf_image_by_id(leaf_id, session_dir):
         print(f"Erreur chargement image feuille {leaf_id}: {e}")
         return None
 
+# Callback pour ouvrir/fermer le modal de sélection de session
+@app.callback(
+    [Output('session-modal', 'style'),
+     Output('session-selector', 'options')],
+    [Input('open-session-modal', 'n_clicks'),
+     Input('close-session-modal', 'n_clicks'),
+     Input('load-selected-session', 'n_clicks')],
+    prevent_initial_call=True
+)
+def toggle_session_modal(open_clicks, close_clicks, load_clicks):
+    ctx = callback_context
+    if not ctx.triggered:
+        return {'display': 'none'}, []
+    
+    button_id = ctx.triggered[0]['prop_id'].split('.')[0]
+    
+    if button_id == 'open-session-modal':
+        # Charger toutes les sessions disponibles
+        all_sessions = find_all_targeting_sessions()
+        
+        options = []
+        for session in all_sessions:
+            # Créer label avec infos enrichies
+            label = html.Div([
+                html.Strong(f"📅 {session['date']}"),
+                html.Br(),
+                html.Small(f"🌿 {session['leaf_count']} feuilles", style={'color': '#666'}),
+                html.Br(),
+                html.Small(f"📁 {session['name']}", style={'color': '#999', 'fontSize': '10px'})
+            ])
+            
+            options.append({
+                'label': label,
+                'value': session['path']
+            })
+        
+        return {'display': 'flex'}, options
+    
+    elif button_id == 'close-session-modal' or button_id == 'load-selected-session':
+        return {'display': 'none'}, []
+    
+    return {'display': 'none'}, []
+
+# Callback pour charger une session sélectionnée
+@app.callback(
+    [Output('pointcloud-3d', 'figure'),
+     Output('current-session-info', 'children'),
+     Output('session-changed-signal', 'children')],
+    [Input('load-selected-session', 'n_clicks')],
+    [State('session-selector', 'value')],
+    prevent_initial_call=True
+)
+def load_selected_session(n_clicks, selected_session_path):
+    if not n_clicks or not selected_session_path:
+        raise PreventUpdate
+    
+    # Charger les nouvelles données de session
+    new_targeting_data = load_targeting_data(selected_session_path)
+    
+    if not new_targeting_data:
+        # Garder les données actuelles si erreur
+        raise PreventUpdate
+    
+    # Mettre à jour app_data globales
+    app_data['targeting_data'] = new_targeting_data
+    app_data['session_dir'] = new_targeting_data['session_dir']
+    app_data['leaves_data'] = new_targeting_data['leaves_data']
+    app_data['visited_leaves'] = new_targeting_data['visited_leaves']
+    app_data['current_leaf_id'] = None  # Réinitialiser - pas de feuille sélectionnée
+    
+    # Recharger le point cloud
+    pc_x, pc_y, pc_z, pc_colors, pc_sizes = load_pointcloud_with_targeting(
+        new_targeting_data['session_dir'], 
+        new_targeting_data['leaves_data'], 
+        new_targeting_data['visited_leaves']
+    )
+    
+    # Créer le nouveau graphique 3D
+    pointcloud_figure = go.Figure(data=[go.Scatter3d(
+        x=pc_x, y=pc_y, z=pc_z,
+        mode='markers',
+        marker=dict(
+            size=pc_sizes, 
+            color=pc_colors,
+            line=dict(width=0)
+        ),
+        name='Point Cloud',
+        text=['Point cloud' if pc_colors[i] == 'black' else f'Feuille visitée' for i in range(len(pc_colors))],
+        hovertemplate='<b>%{text}</b><br>X: %{x:.3f}<br>Y: %{y:.3f}<br>Z: %{z:.3f}<br><i>Cliquez pour sélectionner</i><extra></extra>'
+    )]).update_layout(
+        scene=dict(aspectmode='cube'),
+        margin=dict(l=0, r=0, b=0, t=30),
+        title="Point Cloud 3D - Gradient Rouge→Vert (santé des feuilles)"
+    )
+    
+    # Mise à jour du texte de session actuelle
+    session_name = Path(selected_session_path).name
+    session_info_text = f"Session actuelle : {session_name}"
+    
+    # Signal de changement (incrémente pour déclencher les autres callbacks)
+    import time
+    signal_value = str(int(time.time()))
+    
+    return pointcloud_figure, session_info_text, signal_value
+
 # Callback pour mise à jour des infos feuille
 @app.callback(
     Output('leaf-info-content', 'children'),
-    [Input('pointcloud-3d', 'clickData')]
+    [Input('pointcloud-3d', 'clickData'),
+     Input('session-changed-signal', 'children')]
 )
-def update_leaf_info(click_data):
+def update_leaf_info(click_data, session_signal):
     # Chercher si une feuille a été cliquée
     clicked_leaf_id = find_clicked_leaf(click_data, app_data['visited_leaves'], app_data['leaves_data'])
     
@@ -667,6 +915,15 @@ def update_leaf_info(click_data):
         app_data['current_leaf_id'] = clicked_leaf_id
         print(f"🍃 Feuille sélectionnée: {clicked_leaf_id}")
     
+    # Si aucune feuille sélectionnée, afficher état par défaut
+    if app_data['current_leaf_id'] is None:
+        return [
+            html.Div("⌀ Aucune feuille sélectionnée", 
+                    style={'textAlign': 'center', 'color': '#666', 'fontSize': '12px', 
+                           'padding': '20px', 'fontStyle': 'italic'})
+        ]
+    
+    # Sinon, afficher les infos de la feuille
     leaf_info = get_leaf_info_by_id(app_data['current_leaf_id'], app_data['leaves_data'])
     
     return [
@@ -679,15 +936,29 @@ def update_leaf_info(click_data):
 # Callback pour mise à jour de l'image
 @app.callback(
     Output('leaf-image-content', 'children'),
-    [Input('pointcloud-3d', 'clickData')]
+    [Input('pointcloud-3d', 'clickData'),
+     Input('session-changed-signal', 'children')]
 )
-def update_leaf_image(click_data):
+def update_leaf_image(click_data, session_signal):
     # Chercher si une feuille a été cliquée
     clicked_leaf_id = find_clicked_leaf(click_data, app_data['visited_leaves'], app_data['leaves_data'])
     
     if clicked_leaf_id:
         app_data['current_leaf_id'] = clicked_leaf_id
     
+    # Si aucune feuille sélectionnée, afficher état par défaut
+    if app_data['current_leaf_id'] is None:
+        return html.Div(
+            "⌀ Aucune image chargée",
+            style={
+                'height': '160px', 'backgroundColor': '#f5f5f5', 'display': 'flex',
+                'alignItems': 'center', 'justifyContent': 'center',
+                'borderRadius': '5px', 'fontSize': '12px', 'color': '#666',
+                'border': '2px dashed #ccc', 'fontStyle': 'italic'
+            }
+        )
+    
+    # Sinon, charger l'image de la feuille
     leaf_image_src = get_leaf_image_by_id(app_data['current_leaf_id'], app_data['session_dir'])
     
     if leaf_image_src:
@@ -719,12 +990,14 @@ def update_leaf_image(click_data):
             }
         )
 
+
 # Callback pour mise à jour du graphique
 @app.callback(
     Output('fluorescence-chart', 'figure'),
-    [Input('pointcloud-3d', 'clickData')]
+    [Input('pointcloud-3d', 'clickData'),
+     Input('session-changed-signal', 'children')]
 )
-def update_fluorescence_chart(click_data):
+def update_fluorescence_chart(click_data, session_signal):
     # Chercher si une feuille a été cliquée
     clicked_leaf_id = find_clicked_leaf(click_data, app_data['visited_leaves'], app_data['leaves_data'])
     
@@ -733,7 +1006,23 @@ def update_fluorescence_chart(click_data):
     
     leaf_id = app_data['current_leaf_id']
     
-    # Charger données fluorescence pour cette feuille
+    # Si aucune feuille sélectionnée, afficher état par défaut
+    if leaf_id is None:
+        return go.Figure().update_layout(
+            title="⌀ Aucune données de fluorescence chargées",
+            xaxis_title="Temps (s)",
+            yaxis_title="Intensité", 
+            margin=dict(l=50, r=50, b=50, t=50),
+            showlegend=False,
+            annotations=[{
+                'text': 'Cliquez sur une feuille dans le point cloud<br>pour afficher ses données de fluorescence',
+                'xref': 'paper', 'yref': 'paper',
+                'x': 0.5, 'y': 0.5, 'xanchor': 'center', 'yanchor': 'middle',
+                'showarrow': False, 'font': {'size': 14, 'color': '#666'}
+            }]
+        )
+    
+    # Sinon, charger données fluorescence pour cette feuille
     if app_data['session_dir']:
         time_data, fluor_data, fluor_config = load_fluorescence_data_for_leaf(app_data['session_dir'], leaf_id)
     else:
