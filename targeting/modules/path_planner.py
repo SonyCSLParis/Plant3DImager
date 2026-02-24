@@ -18,8 +18,15 @@ CYLINDER_CENTER = (config.CENTER_POINT[0], config.CENTER_POINT[1])
 CYLINDER_RADIUS = 0.15  # 15cm safety radius
 CYLINDER_Z_MIN = -0.315
 CYLINDER_Z_MAX = 0.0
-APPROACH_DISTANCE = 0.20  # 20cm from centroid
+APPROACH_DISTANCE = 0.09  # 15cm from centroid
 AVOIDANCE_RADIUS = 0.25  # 25cm - circle for waypoints placement
+
+def is_within_robot_limits(position):
+    """Check if position is within robot limits"""
+    x, y, z = position
+    return (0 <= x <= 0.76 and 
+            0 <= y <= 0.72 and 
+            -0.315 <= z <= 0)
 
 def point_in_cylinder(point, center_xy, radius, z_min, z_max):
     """Check if point is inside cylinder"""
@@ -114,6 +121,13 @@ def create_spline_trajectory(start, end, waypoints=None, num_points=12):
     trajectory = []
     for t in t_sample:
         point = (float(spline_x(t)), float(spline_y(t)), float(spline_z(t)))
+        
+        # Clamp waypoint to robot limits
+        point = (
+            max(0, min(point[0], 0.76)),   # X limits
+            max(0, min(point[1], 0.72)),   # Y limits  
+            max(-0.315, min(point[2], 0))  # Z limits
+        )
         trajectory.append(point)
     
     return trajectory
@@ -146,6 +160,52 @@ def calculate_approach_point(centroid, normal, distance=APPROACH_DISTANCE):
     approach_point = centroid + normal_normalized * distance
     return approach_point.tolist()
 
+def calculate_fluoro_point_with_offset(centroid, normal, distance=0.03, offset_mm=25):
+    """
+    Calculate fluorescence point with geometric offset compensation
+    
+    Args:
+        centroid: Leaf centroid coordinates
+        normal: Leaf normal vector
+        distance: Base distance from leaf (default 5cm)
+        offset_mm: Sensor offset in mm (default 25mm)
+    
+    Returns:
+        Corrected fluorescence point coordinates
+    """
+    # Point base à la distance spécifiée le long de la normale
+    centroid = np.array(centroid)
+    normal_vec = np.array(normal)
+    normal_normalized = normal_vec / np.linalg.norm(normal_vec)
+    base_point = centroid + normal_normalized * distance
+    
+    # Direction verticale
+    vertical_direction = np.array([0, 0, 1])
+    
+    # Vecteur dans le plan perpendiculaire à la normale
+    # Projection de la verticale sur le plan perpendiculaire à la normale
+    vertical_proj = vertical_direction - np.dot(vertical_direction, normal_normalized) * normal_normalized
+    
+    # Vérifier si la projection n'est pas nulle (normale pas verticale)
+    if np.linalg.norm(vertical_proj) < 1e-6:
+        # Si normale est verticale, utiliser direction X
+        horizontal_direction = np.array([1, 0, 0])
+        vertical_proj = horizontal_direction - np.dot(horizontal_direction, normal_normalized) * normal_normalized
+    
+    # Normaliser la direction perpendiculaire dans le plan
+    if np.linalg.norm(vertical_proj) > 1e-6:
+        vertical_proj_normalized = vertical_proj / np.linalg.norm(vertical_proj)
+        
+        # Décalage -offset_mm dans cette direction (compensation capteur vers le haut)
+        offset_m = offset_mm / 1000.0  # Conversion mm vers m
+        offset = -vertical_proj_normalized * offset_m
+        
+        return (base_point + offset).tolist()
+    else:
+        # Cas limite : retourner point base sans décalage
+        print("Warning: Could not calculate geometric offset, using base point")
+        return base_point.tolist()
+
 def plan_complete_path(start_position, target_leaves, center_point=None, circle_radius=None, num_circle_points=None):
     """Plan complete trajectory using spline paths"""
     if not target_leaves:
@@ -167,8 +227,22 @@ def plan_complete_path(start_position, target_leaves, center_point=None, circle_
         normal = leaf['normal']
         leaf_id = leaf.get('id', i+1)
         
-        # Calculate approach point
+        # Calculate approach point (photo position at 20cm)
         approach_point = calculate_approach_point(centroid, normal, APPROACH_DISTANCE)
+        
+        # Calculate fluorescence point (3.75cm from centroid with 25mm geometric offset)
+        fluoro_point = calculate_fluoro_point_with_offset(centroid, normal, 0.03, 25)
+        
+        # Check if essential points are within limits
+        if not is_within_robot_limits(approach_point):
+            print(f"ERROR: Photo point for leaf {leaf_id} outside robot limits - SKIPPING LEAF")
+            print(f"  Position: {approach_point}")
+            continue
+        
+        if not is_within_robot_limits(fluoro_point):
+            print(f"ERROR: Fluoro point for leaf {leaf_id} outside robot limits - SKIPPING LEAF") 
+            print(f"  Position: {fluoro_point}")
+            continue
         
         # Plan spline trajectory to approach point
         spline_to_approach = plan_spline_trajectory(current_position, approach_point, num_points=10)
@@ -181,27 +255,28 @@ def plan_complete_path(start_position, target_leaves, center_point=None, circle_
                 "comment": f"Spline to leaf {leaf_id}, point {j+1}"
             })
         
-        # Approach point (photo position)
+        # Approach point (photo position at 20cm)
         path.append({
             "position": approach_point,
             "type": "photo_point",
-            "comment": f"Photo position for leaf {leaf_id}",
+            "comment": f"Photo position for leaf {leaf_id} (20cm)",
             "leaf_data": leaf
         })
         
-        # Fluorescence position (at centroid)
+        # Fluorescence position (5cm from centroid)
         path.append({
-            "position": centroid,
+            "position": fluoro_point,
             "type": "fluoro_point",
-            "comment": f"Fluorescence position for leaf {leaf_id}",
+            "comment": f"Fluorescence position for leaf {leaf_id} (5cm)",
             "leaf_data": leaf
         })
         
-        # Return to approach point
+        # Return to photo point (20cm) before final rotation
         path.append({
             "position": approach_point,
-            "type": "via_point",
-            "comment": f"Return to approach for leaf {leaf_id}"
+            "type": "return_photo_point",
+            "comment": f"Return to photo position for leaf {leaf_id} (20cm)",
+            "leaf_data": leaf
         })
         
         current_position = approach_point

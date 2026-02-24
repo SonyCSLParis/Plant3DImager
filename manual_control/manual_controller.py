@@ -276,17 +276,6 @@ class ManualController:
         """Properly shut down the system"""
         print("\nShutting down manual control system...")
         
-        # Return robot to position (0, 0, 0)
-        if self.cnc is not None:
-            try:
-                print("Moving to position (0, 0, 0)...")
-                self.cnc.move_to(0, 0, 0, wait=True)
-                
-                print("Returning to home position (homing)...")
-                self.cnc.home()
-            except Exception as e:
-                print(f"Error during homing: {e}")
-        
         # Reset camera to initial position
         if self.gimbal is not None:
             try:
@@ -303,7 +292,7 @@ class ManualController:
             self.camera.shutdown()
         
         if hasattr(self, 'cnc') and self.cnc:
-            self.cnc.shutdown()
+            self.cnc.shutdown()  # Ce shutdown() fait déjà le homing
         
         self.initialized = False
         print("Manual control system shut down.")

@@ -1,0 +1,4 @@
+L'ajout de la méthode travel a nécéssité une modification du fichier suivant : 
+/home/romi/venv-romi/lib/python3.11/site-packages/romi/cnc.py
+
+git push dans ce repertoire ne changera jamais le fichier ci-dessus. c'est Peter qui doit push la nouvelle version dans romi-app

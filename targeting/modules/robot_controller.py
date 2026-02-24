@@ -48,7 +48,7 @@ class RobotController:
         
         # Find action indices
         for i, point_info in enumerate(path):
-            if point_info["type"] in ["photo_point", "fluoro_point"]:
+            if point_info["type"] in ["photo_point", "fluoro_point", "return_photo_point"]:
                 action_indices.append(i)
         
         if not action_indices:
@@ -71,12 +71,27 @@ class RobotController:
         return segments
     
     def _execute_segment(self, segment):
-        """Execute trajectory segment using travel()"""
+        """Execute trajectory segment using travel() with move_to fallback"""
         if len(segment) <= 1:
             return True
         
         waypoints = [point_info["position"] for point_info in segment]
-        return self.cnc.travel(waypoints, wait=True)
+        
+        # Essayer travel() d'abord
+        success = self.cnc.travel(waypoints, wait=True)
+        if success:
+            return True
+        
+        print("Travel failed, using move_to fallback...")
+        
+        # Fallback : move_to pour chaque point
+        for point in waypoints:
+            success = self.cnc.move_to(point[0], point[1], point[2], wait=True)
+            if not success:
+                print("Move_to also failed!")
+                return False
+        
+        return True
     
     def _execute_photo_actions(self, point_info, auto_photo, stabilization_time):
         """Execute photo actions at photo_point"""
@@ -129,7 +144,7 @@ class RobotController:
         return True
     
     def _execute_fluoro_actions(self, point_info):
-        """Execute fluorescence actions at fluoro_point"""
+        """Execute fluorescence actions at fluoro_point with new sequence protocol"""
         leaf_data = point_info.get("leaf_data", {})
         leaf_id = leaf_data.get("id")
         
@@ -138,32 +153,52 @@ class RobotController:
         print(f"\n--- Fluorescence measurement for leaf {leaf_id} ---")
         
         if self.fluo_available:
-            print("Performing fluorescence measurement...")
-            measurements = self.fluo_sensor.measure_simple()
+            print("Performing sequence-based fluorescence measurement...")
             
-            if measurements:
+            # Utiliser la nouvelle interface avec résultat enrichi
+            fluo_result = self.fluo_sensor.measure_simple()
+            
+            if fluo_result and fluo_result.get('success', False):
+                measurements = fluo_result['measurements']
+                
+                # Sauvegarder avec données enrichies
                 fluo_data = self.save_fluorescence_data(
-                    measurements, leaf_id, final_pos, 0
+                    fluo_result, leaf_id, final_pos, 0
                 )
+                
+                # Statistiques pour log
+                sequence_params = fluo_result.get('sequence_params', {})
+                timing_info = fluo_result.get('timing_info', {})
+                
                 print(f"Fluorescence completed: {len(measurements)} points")
-                print(f"Average: {np.mean(measurements):.6f}")
+                print(f"Protocol: {sequence_params.get('pulse_duration', 0)}s pulse + {sequence_params.get('dark_duration', 0)}s dark")
+                print(f"Timing: {timing_info.get('execution_time', 0):.1f}s (theo: {timing_info.get('theoretical_duration', 0)}s)")
+                print(f"Average fluorescence: {np.mean(measurements):.6f}")
+                
+                return True
             else:
-                print("Error: No fluorescence data received")
+                error_msg = fluo_result.get('error', 'Unknown error') if fluo_result else 'No response'
+                print(f"Error: Fluorescence measurement failed - {error_msg}")
+                return False
         else:
             print("No fluorescence sensor available")
-        
-        return True
+            return True
     
-    def _execute_post_fluoro_actions(self, next_point_info):
-        """Execute post-fluorescence actions (tilt reset)"""
+    def _execute_return_photo_actions(self, point_info):
+        """Execute actions at return photo point (tilt reset to normal position)"""
+        leaf_data = point_info.get("leaf_data", {})
+        leaf_id = leaf_data.get("id")
+        
+        print(f"\n--- Return to photo position for leaf {leaf_id} ---")
         print("Rotating tilt back to normal position...")
+        
         success = self.gimbal.send_command(0, -180, wait_for_goal=True)
         if success:
-            print("Tilt rotated back successfully")
+            print("Tilt rotated back successfully - Ready for next leaf")
         else:
             print("Warning: Could not rotate tilt back")
         
-        return True
+        return success
     
     def execute_path(self, path, leaf_centroids=None, leaf_ids=None, auto_photo=True, stabilization_time=3.0):
         """
@@ -208,11 +243,8 @@ class RobotController:
                 elif point_type == "fluoro_point":
                     self._execute_fluoro_actions(last_point)
                     
-                    # Check if next segment exists and reset tilt
-                    if i + 1 < len(segments):
-                        next_segment = segments[i + 1]
-                        if next_segment:
-                            self._execute_post_fluoro_actions(next_segment[0])
+                elif point_type == "return_photo_point":
+                    self._execute_return_photo_actions(last_point)
             
             return True
             
@@ -222,11 +254,32 @@ class RobotController:
             traceback.print_exc()
             return False
     
-    def save_fluorescence_data(self, measurements, leaf_id, position, leaf_index):
-        """Save fluorescence measurements to JSON file"""
+    def save_fluorescence_data(self, fluo_result, leaf_id, position, leaf_index):
+        """
+        Save enriched fluorescence measurements to JSON file
+        
+        Args:
+            fluo_result (dict): Complete result from FluoController.measure_simple()
+            leaf_id: Leaf identifier  
+            position: Robot position dict
+            leaf_index: Leaf index number
+            
+        Returns:
+            dict: Complete saved data
+        """
         timestamp = datetime.now().isoformat()
         
-        fluo_data = {
+        # Extraire données du capteur
+        measurements = fluo_result.get('measurements', [])
+        timestamps = fluo_result.get('timestamps', [])
+        sequence_params = fluo_result.get('sequence_params', {})
+        timing_info = fluo_result.get('timing_info', {})
+        device_info = fluo_result.get('device_info', 'Unknown sensor')
+        pattern_type = fluo_result.get('pattern_type', 'unknown')
+        
+        # JSON enrichi combinant robot + capteur
+        enriched_fluo_data = {
+            # Données robot (format original)
             "timestamp": timestamp,
             "leaf_id": leaf_id if leaf_id is not None else f"leaf_{leaf_index + 1}",
             "leaf_index": leaf_index,
@@ -242,26 +295,38 @@ class RobotController:
             "measurements": measurements,
             "statistics": {
                 "count": len(measurements),
-                "mean": float(np.mean(measurements)),
-                "std": float(np.std(measurements)),
-                "min": float(np.min(measurements)),
-                "max": float(np.max(measurements))
-            }
+                "mean": float(np.mean(measurements)) if measurements else 0,
+                "std": float(np.std(measurements)) if measurements else 0,
+                "min": float(np.min(measurements)) if measurements else 0,
+                "max": float(np.max(measurements)) if measurements else 0
+            },
+            
+            # Nouvelles données capteur (enrichissement)
+            "timestamps": timestamps,
+            "sequence_params": sequence_params,
+            "timing_info": timing_info,
+            "device_info": device_info,
+            "pattern_type": pattern_type,
+            
+            # Métadonnées intégration
+            "format_version": "2.0",
+            "integration": "ROMI_leaf_targeting"
         }
         
         # Save to file
         if self.analysis_dir:
-            filename = f"fluorescence_leaf_{fluo_data['leaf_id']}_{timestamp.replace(':', '-')}.json"
+            timestamp_safe = timestamp.replace(':', '-')
+            filename = f"fluorescence_leaf_{enriched_fluo_data['leaf_id']}_{timestamp_safe}.json"
             filepath = os.path.join(self.analysis_dir, filename)
             
             try:
                 with open(filepath, 'w') as f:
-                    json.dump(fluo_data, f, indent=2)
-                print(f"Fluorescence data saved: {filepath}")
+                    json.dump(enriched_fluo_data, f, indent=2)
+                print(f"Enriched fluorescence data saved: {filepath}")
             except Exception as e:
                 print(f"Warning: Could not save fluorescence data: {e}")
         
-        return fluo_data
+        return enriched_fluo_data
     
     def shutdown(self):
         """Properly shut down the robot"""

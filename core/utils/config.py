@@ -18,7 +18,7 @@ _config_loaded = False
 
 # Default values
 _defaults = {
-    "TARGET_POINT": [0.375, 0.35, 0.30],
+    "TARGET_POINT": [0.375, 0.35, 0.40],
     "CENTER_POINT": [0.375, 0.35, 0.00],
     "CIRCLE_RADIUS": 0.20,
     "NUM_POSITIONS": 80,
