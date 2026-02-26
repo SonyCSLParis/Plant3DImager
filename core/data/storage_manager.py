@@ -296,6 +296,66 @@ class StorageManager:
             print(f"Error during save: {e}")
             return False
 
+    # Palette de 20 couleurs distinctes (RGB 0-255), cohérente avec visualization.py
+    SEG_PALETTE = [
+        [31,  119, 180], [255, 127,  14], [ 44, 160,  44], [214,  39,  40],
+        [148, 103, 189], [140,  86,  75], [227, 119, 194], [127, 127, 127],
+        [188, 189,  34], [ 23, 190, 207], [ 57, 115, 163], [255, 179,  71],
+        [ 90, 174,  97], [239,  65,  54], [175, 122, 162], [166, 118,  29],
+        [206, 219, 156], [220, 220, 220], [255, 237, 111], [ 86, 180, 233],
+    ]
+
+    def save_segmentation_pointcloud(self, leaves_data, output_ply, output_labels):
+        """
+        Sauvegarde un PLY coloré par feuille + un fichier .npy de labels.
+        Utilisé par web_viewer pour le mode Segmentation.
+
+        Les points dans leaves_data['points'] sont en mètres.
+        segmentation.ply est donc en mètres (pas de scaling dans le viewer).
+
+        Args:
+            leaves_data  : liste de dicts (avec clé 'points' encore présente)
+            output_ply   : chemin vers segmentation.ply
+            output_labels: chemin vers segmentation_labels.npy (uint16, leaf_id par point)
+        """
+        try:
+            all_pts    = []
+            all_labels = []
+
+            for leaf in leaves_data:
+                if 'points' not in leaf or not leaf['points']:
+                    continue
+                pts      = np.array(leaf['points'], dtype=np.float64)
+                leaf_id  = int(leaf['id'])
+                all_pts.append(pts)
+                all_labels.extend([leaf_id] * len(pts))
+
+            if not all_pts:
+                print("save_segmentation_pointcloud: aucun point à sauvegarder")
+                return False
+
+            all_pts    = np.vstack(all_pts)
+            all_labels = np.array(all_labels, dtype=np.uint16)
+
+            # Couleurs normalisées [0,1] pour open3d
+            palette_f = np.array(self.SEG_PALETTE, dtype=np.float64) / 255.0
+            colors    = np.array([palette_f[(l - 1) % len(palette_f)] for l in all_labels])
+
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(all_pts)
+            pcd.colors = o3d.utility.Vector3dVector(colors)
+            o3d.io.write_point_cloud(output_ply, pcd)
+            print(f"Segmentation PLY saved: {output_ply} ({len(all_pts)} pts)")
+
+            np.save(output_labels, all_labels)
+            print(f"Segmentation labels saved: {output_labels}")
+
+            return True
+
+        except Exception as e:
+            print(f"Error saving segmentation pointcloud: {e}")
+            return False
+
     def load_leaves_data(self, input_file):
         """Load leaf data from JSON file"""
         try:

@@ -1,0 +1,42 @@
+{
+  "timestamp": "2026-02-24T15:35:04.956612",
+  "leaf_id": 1,
+  "leaf_index": 0,
+  "position": {
+    "x": 0.288775,
+    "y": 0.4603125,
+    "z": -0.254215
+  },
+  "camera_angles": {
+    "pan": 96.83306634913862,
+    "tilt": 205.71727634424633
+  },
+  "measurements": [],
+  "statistics": {
+    "count": 0,
+    "mean": 0,
+    "std": 0,
+    "min": 0,
+    "max": 0
+  },
+  "timestamps": [],
+  "sequence_params": {
+    "pulse_intensity": 140,
+    "dark_intensity": 1,
+    "initial_dark_duration": 5.0,
+    "pulse_duration": 60.0,
+    "final_dark_duration": 60.0,
+    "frequency": 5,
+    "total_points": 0,
+    "segments_count": 3
+  },
+  "timing_info": {
+    "execution_time": 141.402348279953,
+    "theoretical_duration": 125.0,
+    "start_timestamp": "2026-02-24T15:35:04.956586"
+  },
+  "device_info": "Ambit Fluorescence Sensor",
+  "pattern_type": "leaf_targeting_measurement",
+  "format_version": "2.0",
+  "integration": "ROMI_leaf_targeting"
+}

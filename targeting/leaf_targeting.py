@@ -2,9 +2,11 @@
 # -*- coding: utf-8 -*-
 
 """
-Main script for leaf targeting system with integrated fluorescence sensor
-Unified version that replaces both leaf_targeting.py and leaf_targeting_with_fluo.py
-MODIFIED: Added viewer support (pointcloud copy + random health_status)
+Main script for leaf targeting system with integrated fluorescence sensor.
+Pipeline updated to use eigenvalue + graph-based leaf detection
+(replaces Alpha Shape + Louvain community detection).
+
+MODIFIED: Alpha Shape removed, detection replaced by detect_leaves()
 """
 
 import os
@@ -15,7 +17,7 @@ import time
 import random
 import shutil
 
-# Imports from new architecture
+# Core imports
 from core.hardware.cnc_controller import CNCController
 from core.hardware.camera_controller import CameraController
 from core.hardware.gimbal_controller import GimbalController
@@ -23,426 +25,431 @@ from core.hardware.fluo_controller import FluoController
 from core.data.storage_manager import StorageManager
 from core.utils import config
 
-# Imports from unified storage manager
-from core.data.storage_manager import StorageManager
-from targeting.modules.leaf_analyzer import calculate_adaptive_radius, build_connectivity_graph
-from targeting.modules.leaf_analyzer import detect_communities_louvain_multiple, extract_leaf_data_from_communities
+# Leaf detection — single entry point
+from targeting.modules.leaf_analyzer import detect_leaves
+
+# Other targeting modules (unchanged)
 from targeting.modules.interactive_selector import select_leaf_with_matplotlib
 from targeting.modules.path_planner import plan_complete_path
 from targeting.modules.robot_controller import RobotController
 from targeting.modules.visualization import visualize_complete_path
 
-# Health status calculation based on fluorescence
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Health status from fluorescence
+# ─────────────────────────────────────────────────────────────────────────────
+
 HEALTH_THRESHOLDS = {
-    "Critique": 0.010,     # < 0.010
-    "Stressé": 0.015,      # 0.010-0.015  
-    "Normal": 0.020,       # 0.015-0.020
-    "Bon": 0.025,          # 0.020-0.025
-    "Excellent": float('inf')  # > 0.025
+    "Critique" : 0.010,
+    "Stressé"  : 0.015,
+    "Normal"   : 0.020,
+    "Bon"      : 0.025,
+    "Excellent": float('inf'),
 }
 
 HEALTH_COLORS = {
-    "Critique": "#D32F2F",    # Rouge foncé
-    "Stressé": "#FF7043",     # Orange-rouge
-    "Normal": "#FFA726",      # Orange
-    "Bon": "#66BB6A",         # Vert clair
-    "Excellent": "#2E7D32"    # Vert foncé
+    "Critique" : "#D32F2F",
+    "Stressé"  : "#FF7043",
+    "Normal"   : "#FFA726",
+    "Bon"      : "#66BB6A",
+    "Excellent": "#2E7D32",
 }
 
+
 def calculate_health_from_fluorescence(mean_fluorescence):
-    """Calcule l'état de santé basé sur la moyenne de fluorescence"""
-    if mean_fluorescence < HEALTH_THRESHOLDS["Critique"]:
-        return "Critique"
-    elif mean_fluorescence < HEALTH_THRESHOLDS["Stressé"]:
-        return "Stressé"
-    elif mean_fluorescence < HEALTH_THRESHOLDS["Normal"]:
-        return "Normal"
-    elif mean_fluorescence < HEALTH_THRESHOLDS["Bon"]:
-        return "Bon"
-    else:
-        return "Excellent"
+    for status, threshold in HEALTH_THRESHOLDS.items():
+        if mean_fluorescence < threshold:
+            return status
+    return "Excellent"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main class
+# ─────────────────────────────────────────────────────────────────────────────
 
 class LeafTargeting:
-    """Main class for leaf targeting system with integrated fluorescence sensor"""
-    
+    """Leaf targeting system — eigenvalue + graph-based detection."""
+
     def __init__(self, args=None):
-        """
-        Initialize the leaf targeting system
-        
-        Args:
-            args: Command line arguments (optional)
-        """
-        # Default parameters
+
+        # ── Detection parameters (new method) ────────────────────────────────
+        self.k_kmeans              = config.get("SEG_K_KMEANS", 3)
+        self.k_neighbors           = config.get("SEG_K_NEIGHBORS", 150)
+        self.max_distance          = config.get("SEG_MAX_DISTANCE", 0.002)
+        self.min_cluster_size      = config.get("SEG_MIN_CLUSTER_SIZE", 1000)
+        self.angle_threshold       = config.get("SEG_ANGLE_THRESHOLD", 15.0)
+        self.merge_distance        = config.get("SEG_MERGE_DISTANCE", 0.015)
+        self.distance              = config.get("TARGETING_DISTANCE", 0.1)
+
+        # ── General parameters ────────────────────────────────────────────────
         self.point_cloud_path = None
-        self.scale = 0.001
-        self.alpha = 0.1
-        self.crop_method = 'none'
-        self.crop_percentage = 0.25
-        self.z_offset = 0.0
-        self.arduino_port = config.ARDUINO_PORT
-        self.simulate = False
-        self.take_photos = True  # NEW: Default to True (auto photos)
-        self.louvain_coeff = 0.5
-        self.distance = 0.1
-        self.enable_fluorescence = config.ENABLE_FLUORESCENCE  # From config
-        
-        # Update parameters with command line arguments
+        self.scale            = 0.001
+        self.arduino_port     = config.ARDUINO_PORT
+        self.simulate         = False
+        self.take_photos      = True
+        self.enable_fluorescence = config.ENABLE_FLUORESCENCE
+
         if args:
-            self.update_from_args(args)
-        
-        # Hardware controllers
-        self.cnc = None
-        self.camera = None
-        self.gimbal = None
+            self._update_from_args(args)
+
+        # ── Hardware ──────────────────────────────────────────────────────────
+        self.cnc        = None
+        self.camera     = None
+        self.gimbal     = None
         self.fluo_sensor = None
-        self.robot = None
-        
-        # Storage manager
-        self.storage = None
+        self.robot      = None
+
+        # ── Storage ───────────────────────────────────────────────────────────
+        self.storage      = None
         self.session_dirs = None
-        
-        # Data
-        self.pcd = None
-        self.points = None
-        self.alpha_pcd = None
-        self.alpha_points = None
-        self.leaves_data = []
+
+        # ── Data ──────────────────────────────────────────────────────────────
+        self.pcd          = None
+        self.points       = None
+        self.leaves_data  = []
         self.selected_leaves = []
-        
-        # State
+
         self.initialized = False
-    
-    def update_from_args(self, args):
-        """Update parameters from command line arguments"""
-        if hasattr(args, 'point_cloud') and args.point_cloud is not None:
-            self.point_cloud_path = args.point_cloud
-        
-        if hasattr(args, 'scale') and args.scale is not None:
-            self.scale = args.scale
-        
-        if hasattr(args, 'alpha') and args.alpha is not None:
-            self.alpha = args.alpha
-        
-        if hasattr(args, 'crop_method') and args.crop_method is not None:
-            self.crop_method = args.crop_method
-        
-        if hasattr(args, 'crop_percentage') and args.crop_percentage is not None:
-            self.crop_percentage = args.crop_percentage
-        
-        if hasattr(args, 'z_offset') and args.z_offset is not None:
-            self.z_offset = args.z_offset
-        
-        if hasattr(args, 'arduino_port') and args.arduino_port is not None:
-            self.arduino_port = args.arduino_port
-        
-        if hasattr(args, 'simulate') and args.simulate is not None:
-            self.simulate = args.simulate
-        
-        # NEW: Inverted photo logic
-        if hasattr(args, 'no_photo') and args.no_photo:
+
+    # ── Parameter update ─────────────────────────────────────────────────────
+
+    def _update_from_args(self, args):
+        mapping = [
+            ("point_cloud",        "point_cloud_path"),
+            ("scale",              "scale"),
+            ("arduino_port",       "arduino_port"),
+            ("simulate",           "simulate"),
+            ("k_kmeans",           "k_kmeans"),
+            ("k_neighbors",        "k_neighbors"),
+            ("max_distance",       "max_distance"),
+            ("min_cluster_size",   "min_cluster_size"),
+            ("angle_threshold",    "angle_threshold"),
+            ("merge_distance",     "merge_distance"),
+            ("distance",           "distance"),
+        ]
+        for arg_name, attr_name in mapping:
+            val = getattr(args, arg_name, None)
+            if val is not None:
+                setattr(self, attr_name, val)
+
+        if getattr(args, "no_photo", False):
             self.take_photos = False
-        
-        if hasattr(args, 'louvain_coeff') and args.louvain_coeff is not None:
-            self.louvain_coeff = args.louvain_coeff
-            
-        if hasattr(args, 'distance') and args.distance is not None:
-            self.distance = args.distance
-        
-        # NEW: Fluorescence disable option
-        if hasattr(args, 'disable_fluorescence') and args.disable_fluorescence:
+        if getattr(args, "disable_fluorescence", False):
             self.enable_fluorescence = False
-    
+
+    # ── Initialization ────────────────────────────────────────────────────────
+
     def initialize(self):
-        """Initialize components and directories"""
         if self.initialized:
             return True
-        
         try:
             print("\n=== Initializing leaf targeting system ===")
-            
-            # Check point cloud path
+
             if not self.point_cloud_path:
-                print("ERROR: Point cloud path not specified")
-                return False
-            
+                print("No point cloud specified — searching for latest in results/pointclouds/...")
+                self.point_cloud_path = find_latest_pointcloud()
+                if not self.point_cloud_path:
+                    print("ERROR: No point cloud found in results/pointclouds/")
+                    return False
             if not os.path.exists(self.point_cloud_path):
                 print(f"ERROR: File {self.point_cloud_path} does not exist")
                 return False
-            
-            # Create storage manager
+
+            # Directories
             self.storage = StorageManager(mode="targeting")
             self.session_dirs = self.storage.create_directory_structure()
-            
+
             print("\nDirectories created:")
             for key, path in self.session_dirs.items():
-                print(f"- {key}: {path}")
-            
-            # Initialize hardware controllers (only if not in simulation mode)
+                print(f"  - {key}: {path}")
+
+            # Hardware (skipped in simulation)
             if not self.simulate:
                 self.cnc = CNCController(config.CNC_SPEED)
                 self.cnc.connect()
-                
+
                 self.camera = CameraController()
                 self.camera.connect()
                 self.camera.set_output_directory(self.session_dirs["images"])
-                
+
                 self.gimbal = GimbalController(self.arduino_port)
                 self.gimbal.connect()
-                
-                # Initialize fluorescence sensor if enabled
+
                 if self.enable_fluorescence:
                     try:
                         print("\n--- Initializing fluorescence sensor ---")
                         self.fluo_sensor = FluoController("fluo", "fluo")
-                        
                         status = self.fluo_sensor.get_device_status()
-                        if status['connected']:
-                            print(f"✅ Fluorescence sensor ready: {status['status']}")
+                        if status["connected"]:
+                            print(f"  Fluorescence sensor ready: {status['status']}")
                         else:
-                            print(f"⚠️  Fluorescence sensor not ready: {status['status']}")
-                            print("   Continuing without fluorescence measurements...")
+                            print(f"  Fluorescence sensor not ready: {status['status']}")
                             self.fluo_sensor = None
                     except Exception as e:
-                        print(f"⚠️  Could not initialize fluorescence sensor: {e}")
-                        print("   Continuing without fluorescence measurements...")
+                        print(f"  Could not initialize fluorescence sensor: {e}")
                         self.fluo_sensor = None
                 else:
-                    print("Fluorescence measurements disabled by configuration")
-                
-                # Initialize robot controller with optional fluorescence sensor
+                    print("  Fluorescence measurements disabled by configuration")
+
                 self.robot = RobotController(
                     cnc=self.cnc,
                     camera=self.camera,
                     gimbal=self.gimbal,
                     fluo_sensor=self.fluo_sensor,
-                    output_dirs=self.session_dirs
+                    output_dirs=self.session_dirs,
                 )
-            
-            # Display parameters
-            print(f"\nTargeting parameters:")
-            print(f"- Point cloud: {self.point_cloud_path}")
-            print(f"- Scale factor: {self.scale}")
-            print(f"- Alpha value: {self.alpha}")
-            print(f"- Cropping method: {self.crop_method}")
-            print(f"- Distance to leaves: {self.distance} m")
-            print(f"- Simulation mode: {'Enabled' if self.simulate else 'Disabled'}")
-            print(f"- Auto photo mode: {'Enabled' if self.take_photos else 'Disabled'}")
-            print(f"- Fluorescence measurements: {'Enabled' if self.fluo_sensor else 'Disabled'}")
-            
+
+            # Summary
+            print(f"\nDetection parameters:")
+            print(f"  Point cloud    : {self.point_cloud_path}")
+            print(f"  Scale factor   : {self.scale} (mm → m)")
+            print(f"  k_kmeans       : {self.k_kmeans}")
+            print(f"  k_neighbors    : {self.k_neighbors}")
+            print(f"  max_distance   : {self.max_distance*1000:.1f} mm")
+            print(f"  min_cluster_sz : {self.min_cluster_size} pts")
+            print(f"  angle_threshold: {self.angle_threshold}°")
+            print(f"  merge_distance : {self.merge_distance*1000:.1f} mm")
+            print(f"  Approach dist  : {self.distance*100:.1f} cm")
+            print(f"  Simulation     : {'ON' if self.simulate else 'OFF'}")
+            print(f"  Auto photo     : {'ON' if self.take_photos else 'OFF'}")
+            print(f"  Fluorescence   : {'ON' if self.fluo_sensor else 'OFF'}")
+
             self.initialized = True
             return True
-            
+
         except Exception as e:
             print(f"Initialization error: {e}")
             self.shutdown()
             return False
-    
+
+    # ── Mock health status (POC) ──────────────────────────────────────────────
+
     def _calculate_health_status_from_fluorescence(self):
-        """Calcule l'état de santé de chaque feuille basé sur les données de fluorescence"""
-        print("Calculating health status from fluorescence data...")
-        
-        # =======================================================================
-        # MODE ALÉATOIRE POUR POC - Génère des valeurs de fluorescence simulées
-        # =======================================================================
-        print("Using random fluorescence values for POC")
+        print("Assigning mock fluorescence health status (POC mode)...")
         for leaf in self.leaves_data:
-            # Générer valeur aléatoire entre nos seuils de référence
-            mock_fluorescence_mean = 0.005 + np.random.random() * 0.025  # Entre 0.005 et 0.030
-            
-            leaf["fluorescence_mean"] = mock_fluorescence_mean
-            leaf["health_status"] = calculate_health_from_fluorescence(mock_fluorescence_mean)
-            
-            print(f"Leaf {leaf.get('id', '?')}: fluor={mock_fluorescence_mean:.4f} → {leaf['health_status']}")
-        
-        return
-    
+            mock_val = 0.005 + np.random.random() * 0.025
+            leaf["fluorescence_mean"] = mock_val
+            leaf["health_status"] = calculate_health_from_fluorescence(mock_val)
+            print(f"  Leaf {leaf.get('id','?')}: "
+                  f"fluor={mock_val:.4f} → {leaf['health_status']}")
+
+    # ── Main pipeline ─────────────────────────────────────────────────────────
+
     def run_targeting(self):
-        """Execute the complete targeting process"""
         if not self.initialize():
             return False
-        
+
         try:
-            # 1-9. Processing steps using unified storage manager
+            # ── 1. Load point cloud ───────────────────────────────────────────
             print("\n=== 1. Loading point cloud ===")
-            self.pcd, self.points = self.storage.load_and_scale_pointcloud(self.point_cloud_path, self.scale)
-            
-            print("\n=== 2. Computing Alpha Shape ===")
-            self.alpha_pcd, self.alpha_points = self.storage.compute_cropped_alpha_shape(
-                self.pcd, self.points, self.alpha, self.crop_method, self.crop_percentage, 
-                self.z_offset, self.session_dirs["analysis"]
+            self.pcd, self.points = self.storage.load_and_scale_pointcloud(
+                self.point_cloud_path, self.scale
             )
-            
-            print("\n=== 3. Computing connectivity radius ===")
-            radius = calculate_adaptive_radius(self.alpha_points)
-            
-            print(f"\n=== 4. Louvain Coefficient: {self.louvain_coeff} ===")
-            coeff = self.louvain_coeff
-            
-            print("\n=== 5. Building connectivity graph ===")
-            graph = build_connectivity_graph(self.alpha_points, radius)
-            
-            min_size = max(10, len(self.alpha_points) // 30)
-            print(f"\n=== 6. Minimum community size: {min_size} points ===")
-            
-            print("\n=== 7. Detecting communities ===")
-            communities = detect_communities_louvain_multiple(graph, coeff, min_size, n_iterations=5)
-            
-            print("\n=== 8. Extracting leaf data ===")
-            self.leaves_data = extract_leaf_data_from_communities(
-                communities, self.alpha_points, distance=self.distance
+
+            # ── 2. Detect leaves ──────────────────────────────────────────────
+            print("\n=== 2. Detecting leaves (eigenvalue + graph) ===")
+            self.leaves_data = detect_leaves(
+                self.pcd,
+                self.points,
+                k_kmeans=self.k_kmeans,
+                k_neighbors=self.k_neighbors,
+                max_distance=self.max_distance,
+                min_cluster_size=self.min_cluster_size,
+                angle_threshold_deg=self.angle_threshold,
+                merge_distance_threshold=self.merge_distance,
+                distance=self.distance,
             )
-            
-            # NEW: Calculate health status based on fluorescence
+
+            if not self.leaves_data:
+                print("ERROR: No leaves detected. Adjust detection parameters.")
+                return False
+
+            # ── 3. Health status (POC) ────────────────────────────────────────
             self._calculate_health_status_from_fluorescence()
-            
-            leaves_json = os.path.join(self.session_dirs["analysis"], "leaves_data.json")
+
+            # ── 4. Save leaf data ─────────────────────────────────────────────
+            leaves_json = os.path.join(
+                self.session_dirs["analysis"], "leaves_data.json"
+            )
             self.storage.save_leaves_data(self.leaves_data, leaves_json)
-            
-            # NEW: Copy point cloud for viewer access
-            print("Copying point cloud for viewer...")
-            pointcloud_copy = os.path.join(self.session_dirs["main"], "pointcloud.ply")
+
+            # ── 4b. Save segmentation point cloud for viewer ─────────────
+            print("\n=== 3. Saving segmentation point cloud ===")
+            seg_ply    = os.path.join(self.session_dirs["main"], "segmentation.ply")
+            seg_labels = os.path.join(self.session_dirs["main"], "segmentation_labels.npy")
+            self.storage.save_segmentation_pointcloud(self.leaves_data, seg_ply, seg_labels)
+
+            # ── 5. Copy point cloud for viewer ───────────────────────────────
+            print("\n=== 3. Copying point cloud for viewer ===")
+            pointcloud_copy = os.path.join(
+                self.session_dirs["main"], "pointcloud.ply"
+            )
             shutil.copy(self.point_cloud_path, pointcloud_copy)
-            print(f"Point cloud copied for viewer: {pointcloud_copy}")
-            
-            print("\n=== 9. Interactive leaf selection ===")
+            print(f"  Copied: {pointcloud_copy}")
+
+            # ── 6. Interactive leaf selection ─────────────────────────────────
+            print("\n=== 4. Interactive leaf selection ===")
             self.selected_leaves = select_leaf_with_matplotlib(
                 self.leaves_data, self.points, self.session_dirs["visualizations"]
             )
-            
+
             if not self.selected_leaves:
-                print("No leaves selected. Ending program.")
+                print("No leaves selected. Ending.")
                 return True
-            
-            # 10-11. Path planning and visualization
-            print("\n=== 10. Planning complete trajectory ===")
+
+            # ── 7. Path planning ──────────────────────────────────────────────
+            print("\n=== 5. Planning trajectory ===")
             current_position = [0, 0, 0]
-            
             if not self.simulate and self.cnc:
                 pos = self.cnc.get_position()
-                current_position = [pos['x'], pos['y'], pos['z']]
-            
+                current_position = [pos["x"], pos["y"], pos["z"]]
+
             complete_path = plan_complete_path(current_position, self.selected_leaves)
-            
-            print("\n=== 11. Visualizing complete trajectory ===")
-            
-            leaf_points_list = []
+
+            # ── 8. Trajectory visualization ───────────────────────────────────
+            print("\n=== 6. Visualizing trajectory ===")
+            leaf_points_list  = []
             leaf_normals_list = []
-            
             for leaf in self.selected_leaves:
-                if 'points' in leaf:
-                    leaf_points_list.append(np.array(leaf['points']))
-                else:
-                    leaf_points_list.append(np.array([leaf['centroid']]))
-                
-                if 'normal' in leaf:
-                    leaf_normals_list.append(np.array(leaf['normal']))
-                else:
-                    leaf_normals_list.append(np.array([0, 0, 1]))
-            
+                leaf_points_list.append(
+                    np.array(leaf["points"]) if "points" in leaf
+                    else np.array([leaf["centroid"]])
+                )
+                leaf_normals_list.append(
+                    np.array(leaf["normal"]) if "normal" in leaf
+                    else np.array([0, 0, 1])
+                )
+
             visualize_complete_path(
-                complete_path, self.points, leaf_points_list, leaf_normals_list, 
-                self.session_dirs["visualizations"]
+                complete_path,
+                self.points,
+                leaf_points_list,
+                leaf_normals_list,
+                self.session_dirs["visualizations"],
             )
-            
+
             if self.simulate:
-                print("\nSimulation mode: Program complete.")
+                print("\nSimulation mode: complete.")
                 return True
-            
-            # 12. Execute trajectory with curved paths
-            print("\n=== 12. Executing trajectory ===")
-            
+
+            # ── 9. Execute trajectory ─────────────────────────────────────────
+            print("\n=== 7. Executing trajectory ===")
             if self.fluo_sensor:
-                print("🧬 Fluorescence measurements enabled")
+                print("  Fluorescence measurements enabled")
             else:
-                print("📷 Photo-only mode")
-            
+                print("  Photo-only mode")
+
             success = self.robot.execute_path(
                 complete_path,
                 auto_photo=self.take_photos,
-                stabilization_time=config.STABILIZATION_TIME
+                stabilization_time=config.STABILIZATION_TIME,
             )
-            
+
             if success:
                 print("\n✅ Trajectory completed successfully.")
-                if self.fluo_sensor:
-                    print("🧬 Fluorescence data saved in analysis/ directory")
-                print(f"\n🌐 Launch viewer: python fluorescence_viewer_browser.py")
-                print(f"📂 Session data: {self.session_dirs['main']}")
+                print(f"  Session data : {self.session_dirs['main']}")
+                print(f"  Viewer       : python web_viewer.py")
             else:
                 print("\n❌ Error during trajectory execution.")
-            
+
             return success
-            
+
         except KeyboardInterrupt:
-            print("\nProgram interrupted by user.")
+            print("\nInterrupted by user.")
             return False
         except Exception as e:
-            print(f"\nAn error occurred: {e}")
+            print(f"\nUnexpected error: {e}")
             import traceback
             traceback.print_exc()
             return False
         finally:
             self.shutdown()
-    
+
+    # ── Shutdown ──────────────────────────────────────────────────────────────
+
     def shutdown(self):
-        """Properly shut down the system"""
         print("\nShutting down targeting system...")
-        
-        if hasattr(self, 'robot') and self.robot and not self.simulate:
+        if hasattr(self, "robot") and self.robot and not self.simulate:
             self.robot.shutdown()
         elif not self.simulate:
-            if hasattr(self, 'fluo_sensor') and self.fluo_sensor:
-                try:
-                    # Fluorescence sensor doesn't have explicit shutdown, just let it be
-                    pass
-                except:
-                    pass
-            
-            if hasattr(self, 'gimbal') and self.gimbal:
-                self.gimbal.shutdown()
-            
-            if hasattr(self, 'camera') and self.camera:
-                self.camera.shutdown()
-            
-            if hasattr(self, 'cnc') and self.cnc:
-                self.cnc.shutdown()
-        
+            for attr in ("gimbal", "camera", "cnc"):
+                obj = getattr(self, attr, None)
+                if obj:
+                    try:
+                        obj.shutdown()
+                    except Exception:
+                        pass
         self.initialized = False
         print("Targeting system shut down.")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# CLI
+# ─────────────────────────────────────────────────────────────────────────────
+
+def find_latest_pointcloud(directory="results/pointclouds"):
+    """
+    Retourne le fichier PointCloud_*.ply le plus récent dans le répertoire donné.
+    Le format AAAAMMDD-HHMMSS permet un tri alphabétique direct.
+    """
+    import glob as _glob
+    pattern = os.path.join(directory, "PointCloud_*.ply")
+    files = sorted(_glob.glob(pattern), reverse=True)
+    if not files:
+        return None
+    latest = files[0]
+    print(f"  Auto-detected point cloud: {latest}")
+    return latest
+
+
 def parse_arguments():
-    """Parse command line arguments with unified fluorescence and photo options"""
-    parser = argparse.ArgumentParser(description='Leaf targeting system with integrated fluorescence measurements')
-    
-    parser.add_argument('point_cloud', help='Point cloud file (PLY/PCD)')
-    parser.add_argument('--scale', type=float, default=0.001, help='Scale factor for point cloud (default: 0.001 = mm->m)')
-    parser.add_argument('--alpha', type=float, default=0.1, help='Alpha value for Alpha Shape (default: 0.1)')
-    parser.add_argument('--crop_method', choices=['none', 'top_percentage', 'single_furthest'], 
-                      default='none', help='Cropping method (default: none)')
-    parser.add_argument('--crop_percentage', type=float, default=0.25, help='Percentage for top_percentage (default: 0.25)')
-    parser.add_argument('--z_offset', type=float, default=0.0, help='Z offset for cropping (default: 0.0)')
-    parser.add_argument('--arduino_port', default=config.ARDUINO_PORT, help=f'Arduino serial port (default: {config.ARDUINO_PORT})')
-    parser.add_argument('--simulate', action='store_true', help='Simulation mode (no robot control)')
-    
-    # NEW: Inverted photo logic
-    parser.add_argument('--no-photo', action='store_true', help='Disable automatic photo capture (default: photos enabled)')
-    
-    parser.add_argument('--louvain_coeff', type=float, default=0.5, help='Coefficient for Louvain detection (default: 0.5)')
-    parser.add_argument('--distance', type=float, default=0.1, help='Distance to target leaves in meters (default: 0.1 m)')
-    
-    # NEW: Fluorescence disable option
-    parser.add_argument('--disable-fluorescence', action='store_true', 
-                       help='Disable fluorescence measurements (photo only)')
-    
+    parser = argparse.ArgumentParser(
+        description="Leaf targeting with eigenvalue + graph-based detection"
+    )
+
+    # Optional positional — si absent, le plus récent dans results/pointclouds/ est utilisé
+    parser.add_argument("point_cloud", nargs='?', default=None,
+        help="Input point cloud file (.ply / .pcd). "
+             "If omitted, the latest PointCloud_*.ply in results/pointclouds/ is used.")
+
+    # General
+    parser.add_argument("--scale", type=float, default=0.001,
+        help="Scale factor applied to point cloud (default 0.001 → mm to m)")
+    parser.add_argument("--arduino_port", default=config.ARDUINO_PORT,
+        help=f"Arduino serial port (default: {config.ARDUINO_PORT})")
+    parser.add_argument("--simulate", action="store_true",
+        help="Simulation mode — no robot control")
+    parser.add_argument("--no-photo", action="store_true",
+        help="Disable automatic photo capture (photos are ON by default)")
+    parser.add_argument("--disable-fluorescence", action="store_true",
+        help="Disable fluorescence measurements")
+    parser.add_argument("--distance", type=float, default=0.1,
+        help="Approach distance to leaf for target_point (meters, default 0.1)")
+
+    # ── Detection parameters ─────────────────────────────────────────────────
+    det = parser.add_argument_group("Detection parameters")
+
+    det.add_argument("--k_kmeans", type=int, default=3,
+        help="KMeans clusters for background separation (default 3)")
+    det.add_argument("--k_neighbors", type=int, default=150,
+        help="KNN neighbours for adjacency graph (default 150)")
+    det.add_argument("--max_distance", type=float, default=0.002,
+        help="Max edge distance in adjacency graph, meters (default 0.002 = 2 mm)")
+    det.add_argument("--min_cluster_size", type=int, default=1000,
+        help="Minimum points per leaf cluster (default 1000)")
+    det.add_argument("--angle_threshold", type=float, default=15.0,
+        help="Max normal angle (°) to merge parallel clusters (default 15)")
+    det.add_argument("--merge_distance", type=float, default=0.015,
+        help="Max centroid distance (m) to merge clusters (default 0.015 = 15 mm)")
+
     return parser.parse_args()
 
+
 def main():
-    """Main function with unified fluorescence integration"""
     args = parse_arguments()
     targeting = LeafTargeting(args)
-    success = targeting.run_targeting()
-    return 0 if success else 1
+    return 0 if targeting.run_targeting() else 1
+
 
 if __name__ == "__main__":
     sys.exit(main())

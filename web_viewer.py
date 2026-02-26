@@ -14,6 +14,15 @@ import glob
 
 app = dash.Dash(__name__)
 
+# Palette segmentation — même ordre que storage_manager.SEG_PALETTE
+SEG_PALETTE_HEX = [
+    '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728',
+    '#9467bd', '#8c564b', '#e377c2', '#7f7f7f',
+    '#bcbd22', '#17becf', '#39739f', '#ffb347',
+    '#5aae61', '#ef4136', '#af76a2', '#a6761d',
+    '#cedb9c', '#dcdcdc', '#ffed6f', '#56b4e9',
+]
+
 # Health status colors mapping (pour affichage textuel)
 HEALTH_COLORS = {
     "Critique": "#D32F2F",    # Rouge foncé
@@ -217,129 +226,75 @@ def load_fluorescence_data_for_leaf(session_dir, leaf_id):
         print(f"Erreur chargement fluorescence feuille {leaf_id}: {e}")
         return [], {}, {}
 
-def load_pointcloud_with_targeting(session_dir, leaves_data, visited_leaves):
-    """Charge le point cloud et identifie les feuilles visitées"""
-    pointcloud_path = Path(session_dir) / "pointcloud.ply"
-    
+def load_pointcloud_with_targeting(session_dir, leaves_data, visited_leaves,
+                                   max_bg_points=3000):
+    """
+    Charge le point cloud brut downsamplé (fond uniquement).
+    Les feuilles visitées sont rendues via des traces séparées dans build_visits_figure.
+    """
+    pointcloud_path = Path(session_dir) / "pointcloud.ply" if session_dir else None
+
     try:
-        from plyfile import PlyData
-        
-        # Lire le fichier PLY
-        plydata = PlyData.read(pointcloud_path)
-        vertex_data = plydata['vertex']
-        
-        # Extraire les coordonnées et appliquer le même scaling que le targeting
-        x = vertex_data['x'] * 0.001  # Convertir mm -> m
-        y = vertex_data['y'] * 0.001  # Convertir mm -> m
-        z = vertex_data['z'] * 0.001  # Convertir mm -> m
-        
-        print(f"Point cloud chargé: {len(x)} points")
-        
-        # Créer array des couleurs (noir par défaut)
-        colors = ['black'] * len(x)
-        sizes = [1] * len(x)
-        
-        # Calculer les valeurs normalisées pour le gradient
-        normalized_values = normalize_fluorescence_values(leaves_data, visited_leaves)
-        
-        # Identifier les feuilles visitées et les colorer avec gradient
-        visited_centroids = []
-        centroid_colors = []
-        for leaf in leaves_data.get('leaves', []):
-            if leaf['id'] in visited_leaves:
-                centroid = leaf['centroid']
-                
-                # Utiliser gradient basé sur fluorescence normalisée
-                if leaf['id'] in normalized_values:
-                    norm_value = normalized_values[leaf['id']]
-                    gradient_color = fluorescence_to_color(norm_value)
-                else:
-                    gradient_color = "#808080"  # Gris si pas de données
-                
-                visited_centroids.append(centroid)
-                centroid_colors.append(gradient_color)
-        
-        # Ajouter les centroïdes comme points séparés (gradient, plus gros)
-        if visited_centroids:
-            centroids_array = np.array(visited_centroids)
-            # Ajouter les centroïdes aux coordonnées
-            x = np.concatenate([x, centroids_array[:, 0]])
-            y = np.concatenate([y, centroids_array[:, 1]]) 
-            z = np.concatenate([z, centroids_array[:, 2]])
-            # Ajouter couleurs gradient et tailles pour les centroïdes
-            colors.extend(centroid_colors)
-            sizes.extend([15] * len(visited_centroids))  # Beaucoup plus gros
-        
-        return x, y, z, colors, sizes
-        
-    except ImportError:
-        print("plyfile non installé, utilisation de trimesh...")
-        try:
-            import trimesh
-            mesh = trimesh.load(pointcloud_path)
-            if hasattr(mesh, 'vertices'):
-                vertices = mesh.vertices * 0.001  # Convertir mm -> m
-                x, y, z = vertices[:, 0], vertices[:, 1], vertices[:, 2]
-                colors = ['black'] * len(x)
-                sizes = [1] * len(x)
-                
-                # Calculer les valeurs normalisées pour le gradient
-                normalized_values = normalize_fluorescence_values(leaves_data, visited_leaves)
-                
-                # Ajouter centroïdes visitées avec gradient de couleurs
-                visited_centroids = []
-                centroid_colors = []
-                for leaf in leaves_data.get('leaves', []):
-                    if leaf['id'] in visited_leaves:
-                        centroid = leaf['centroid']
-                        
-                        # Utiliser gradient basé sur fluorescence normalisée
-                        if leaf['id'] in normalized_values:
-                            norm_value = normalized_values[leaf['id']]
-                            gradient_color = fluorescence_to_color(norm_value)
-                        else:
-                            gradient_color = "#808080"  # Gris si pas de données
-                        
-                        visited_centroids.append(centroid)
-                        centroid_colors.append(gradient_color)
-                
-                if visited_centroids:
-                    centroids_array = np.array(visited_centroids)
-                    x = np.concatenate([x, centroids_array[:, 0]])
-                    y = np.concatenate([y, centroids_array[:, 1]]) 
-                    z = np.concatenate([z, centroids_array[:, 2]])
-                    colors.extend(centroid_colors)
-                    sizes.extend([15] * len(visited_centroids))
-                
-                return x, y, z, colors, sizes
-        except:
-            print("Erreur trimesh, utilisation des données mock")
+        import open3d as o3d
+        pcd = o3d.io.read_point_cloud(str(pointcloud_path))
+        pts = np.asarray(pcd.points) * 0.001  # mm → m
+
+        n = len(pts)
+        if n > max_bg_points:
+            idx = np.random.choice(n, max_bg_points, replace=False)
+            pts = pts[idx]
+
+        print(f"Point cloud fond: {len(pts)} pts (après downsampling)")
+        return pts[:, 0], pts[:, 1], pts[:, 2]
+
     except Exception as e:
-        print(f"Erreur lecture PLY: {e}, utilisation des données mock")
-    
-    # Données mock pour le POC si rien ne fonctionne
-    n_points = 2000
-    t = np.linspace(0, 4*np.pi, n_points)
-    
-    x = np.cos(t) * (1 + 0.3*np.cos(3*t)) + np.random.normal(0, 0.05, n_points)
-    y = np.sin(t) * (1 + 0.3*np.cos(3*t)) + np.random.normal(0, 0.05, n_points)
-    z = 0.1 * np.sin(2*t) + np.random.normal(0, 0.02, n_points)
-    
-    colors = ['black'] * len(x)
-    sizes = [1] * len(x)
-    
-    # Ajouter quelques centroïdes mock
-    if visited_leaves:
-        mock_centroids = [[0.2, 0.3, 0.1], [0.5, 0.1, 0.15]][:len(visited_leaves)]
-        for centroid in mock_centroids:
-            x = np.append(x, centroid[0])
-            y = np.append(y, centroid[1])
-            z = np.append(z, centroid[2])
-            colors.append('red')
-            sizes.append(15)
-    
-    print(f"Point cloud mock généré: {len(x)} points")
-    return x, y, z, colors, sizes
+        print(f"Erreur lecture PLY: {e} — fallback mock")
+        n = 2000
+        t = np.linspace(0, 4*np.pi, n)
+        x = np.cos(t) * (1 + 0.3*np.cos(3*t)) + np.random.normal(0, 0.05, n)
+        y = np.sin(t) * (1 + 0.3*np.cos(3*t)) + np.random.normal(0, 0.05, n)
+        z = 0.1 * np.sin(2*t) + np.random.normal(0, 0.02, n)
+        return x, y, z
+
+
+def build_visits_figure(pc_x, pc_y, pc_z, leaves_data, visited_leaves):
+    """
+    Mode 'Feuilles visitées' : fond noir + centroïdes colorés gradient fluorescence.
+    """
+    normalized_values = normalize_fluorescence_values(leaves_data, visited_leaves)
+
+    traces = [go.Scatter3d(
+        x=pc_x, y=pc_y, z=pc_z,
+        mode='markers',
+        marker=dict(size=1, color='black', opacity=0.4),
+        name='Point cloud',
+        hoverinfo='skip',
+        showlegend=False,
+    )]
+
+    for leaf in leaves_data.get('leaves', []):
+        if leaf['id'] not in visited_leaves:
+            continue
+        c   = leaf['centroid']
+        lid = leaf['id']
+        col = fluorescence_to_color(normalized_values[lid]) if lid in normalized_values else '#808080'
+        hs  = leaf.get('health_status', 'N/A')
+        traces.append(go.Scatter3d(
+            x=[c[0]], y=[c[1]], z=[c[2]],
+            mode='markers',
+            marker=dict(size=12, color=col, symbol='circle',
+                        line=dict(color='black', width=1)),
+            name=f'Feuille {lid}',
+            hovertemplate=f'<b>Feuille N°{lid}</b><br>Santé: {hs}<extra></extra>',
+        ))
+
+    fig = go.Figure(data=traces)
+    fig.update_layout(
+        scene=dict(aspectmode='data'),
+        margin=dict(l=0, r=0, b=0, t=30),
+        title="Feuilles visitées — Gradient Rouge→Vert (santé)",
+    )
+    return fig
 
 def get_leaf_info_for_display(leaves_data, visited_leaves):
     """Récupère les infos de la première feuille visitée pour l'affichage"""
@@ -395,7 +350,185 @@ def load_leaf_image_for_display(session_dir, visited_leaves):
         print(f"Erreur chargement image: {e}")
         return None
 
-# Chargement des données depuis le targeting
+def load_segmentation_data(session_dir, max_pts_per_leaf=500):
+    """
+    Charge segmentation.ply + segmentation_labels.npy.
+    Downsample à max_pts_per_leaf points par feuille pour fluidité.
+    """
+    seg_ply    = Path(session_dir) / "segmentation.ply"
+    seg_labels = Path(session_dir) / "segmentation_labels.npy"
+
+    if not seg_ply.exists() or not seg_labels.exists():
+        print("Fichiers de segmentation absents — mode segmentation indisponible")
+        return None
+
+    try:
+        import open3d as o3d
+        pcd    = o3d.io.read_point_cloud(str(seg_ply))
+        pts    = np.asarray(pcd.points)   # déjà en mètres (sauvegardé en m)
+        labels = np.load(seg_labels)
+
+        # Downsampling par feuille
+        unique_ids = np.unique(labels)
+        xs, ys, zs, ls = [], [], [], []
+        for lid in unique_ids:
+            mask = labels == lid
+            ix = np.where(mask)[0]
+            if len(ix) > max_pts_per_leaf:
+                ix = np.random.choice(ix, max_pts_per_leaf, replace=False)
+            xs.append(pts[ix, 0]); ys.append(pts[ix, 1])
+            zs.append(pts[ix, 2]); ls.append(np.full(len(ix), lid, dtype=np.uint16))
+
+        x_out = np.concatenate(xs)
+        y_out = np.concatenate(ys)
+        z_out = np.concatenate(zs)
+        l_out = np.concatenate(ls)
+
+        print(f"Segmentation chargée: {len(x_out)} pts affichés, "
+              f"{len(unique_ids)} feuilles (max {max_pts_per_leaf} pts/feuille)")
+        return {"x": x_out, "y": y_out, "z": z_out, "labels": l_out}
+
+    except Exception as e:
+        print(f"Erreur chargement segmentation: {e}")
+        return None
+
+
+def build_segmentation_figure(session_dir, leaves_data, pc_x, pc_y, pc_z):
+    """
+    Mode Segmentation — reproduit fidèlement interactive_selector.py :
+    - Fond du nuage en noir, alpha 0.4, size 1
+    - Une trace par feuille (points colorés, size 3)
+    - Centroïde plus gros (size 10) avec contour noir
+    - Hover "Feuille N°X"
+    """
+    import colorsys
+
+    def _hsv_colors(n):
+        """Même algo que generate_distinct_colors() dans interactive_selector."""
+        hexcols = []
+        for i in range(n):
+            h = i / n
+            s = 0.7 + 0.3 * (i % 2)
+            v = 0.8 + 0.2 * (i % 3)
+            r, g, b = colorsys.hsv_to_rgb(h, s, v)
+            ri=min(255,max(0,int(r*255))); gi=min(255,max(0,int(g*255))); bi=min(255,max(0,int(b*255))); hexcols.append(f'#{ri:02x}{gi:02x}{bi:02x}')
+        return hexcols
+
+    seg = load_segmentation_data(session_dir)
+    all_leaves = leaves_data.get('leaves', [])
+    n_leaves   = len(all_leaves)
+    colors     = _hsv_colors(n_leaves)
+
+    # Map leaf id → index pour la couleur
+    id_to_idx = {leaf['id']: i for i, leaf in enumerate(all_leaves)}
+
+    traces = []
+
+    # ── Fond nuage ──────────────────────────────────────────────────────────
+    traces.append(go.Scatter3d(
+        x=pc_x, y=pc_y, z=pc_z,
+        mode='markers',
+        marker=dict(size=1, color='black', opacity=0.4),
+        name='Point cloud',
+        hoverinfo='skip',
+        showlegend=False,
+    ))
+
+    if seg is not None:
+        x, y, z, labels = seg['x'], seg['y'], seg['z'], seg['labels']
+
+        for i, leaf in enumerate(all_leaves):
+            lid  = leaf['id']
+            col  = colors[id_to_idx.get(lid, 0)]
+            mask = labels == lid
+            if not mask.any():
+                continue
+
+            # ── Points de la feuille ────────────────────────────────────
+            traces.append(go.Scatter3d(
+                x=x[mask], y=y[mask], z=z[mask],
+                mode='markers',
+                marker=dict(size=2, color=col, opacity=0.60),
+                name=f'Feuille {lid}',
+                legendgroup=f'leaf_{lid}',
+                hovertemplate=f'<b>Feuille N°{lid}</b><extra></extra>',
+                showlegend=True,
+            ))
+
+            # ── Centroïde + numéro ──────────────────────────────────────
+            c = leaf['centroid']
+            traces.append(go.Scatter3d(
+                x=[c[0]], y=[c[1]], z=[c[2]],
+                mode='markers+text',
+                marker=dict(size=8, color=col, line=dict(color='black', width=2)),
+                text=[str(lid)],
+                textposition='top center',
+                textfont=dict(size=11, color='black'),
+                name=f'Feuille {lid}',
+                legendgroup=f'leaf_{lid}',
+                showlegend=False,
+                hovertemplate=f'<b>Feuille N°{lid}</b><br>'
+                              f'({c[0]:.3f}, {c[1]:.3f}, {c[2]:.3f})<extra></extra>',
+            ))
+
+            # ── Normale (vraie flèche : ligne + cône à la pointe) ──────
+            if 'normal' in leaf:
+                n   = leaf['normal']
+                nl  = 0.05          # longueur du fût 5 cm
+                tip = [c[0] + n[0]*nl, c[1] + n[1]*nl, c[2] + n[2]*nl]
+
+                # Fût de la flèche
+                traces.append(go.Scatter3d(
+                    x=[c[0], tip[0]], y=[c[1], tip[1]], z=[c[2], tip[2]],
+                    mode='lines',
+                    line=dict(color='red', width=4),
+                    showlegend=False,
+                    hoverinfo='skip',
+                ))
+
+                # Tête de la flèche
+                head = 0.012  # taille du cône
+                traces.append(go.Cone(
+                    x=[tip[0]], y=[tip[1]], z=[tip[2]],
+                    u=[n[0]*head], v=[n[1]*head], w=[n[2]*head],
+                    colorscale=[[0, 'red'], [1, 'red']],
+                    showscale=False,
+                    sizemode='absolute',
+                    sizeref=head,
+                    anchor='tail',
+                    showlegend=False,
+                    hoverinfo='skip',
+                ))
+
+    else:
+        # Pas de segmentation : centroïdes uniquement
+        for i, leaf in enumerate(all_leaves):
+            lid = leaf['id']
+            col = colors[id_to_idx.get(lid, 0)]
+            c   = leaf['centroid']
+            traces.append(go.Scatter3d(
+                x=[c[0]], y=[c[1]], z=[c[2]],
+                mode='markers+text',
+                marker=dict(size=12, color=col, symbol='diamond',
+                            line=dict(color='black', width=2)),
+                text=[str(lid)],
+                textposition='top center',
+                textfont=dict(size=12, color='black'),
+                name=f'Feuille {lid}',
+                hovertemplate=f'<b>Feuille N°{lid}</b><extra></extra>',
+            ))
+
+    fig = go.Figure(data=traces)
+    fig.update_layout(
+        scene=dict(aspectmode='data'),
+        margin=dict(l=0, r=0, b=0, t=30),
+        title=f"Segmentation — {n_leaves} feuilles détectées",
+        legend=dict(itemsizing='constant', font=dict(size=10),
+                    title=dict(text='Feuilles')),
+    )
+    return fig
+
+# Chargement initial des données
 targeting_data = load_targeting_data()
 
 if targeting_data:
@@ -405,7 +538,7 @@ if targeting_data:
     
     # Ne pas pré-charger les données de feuille - attendre sélection utilisateur
     current_leaf_id = None
-    pc_x, pc_y, pc_z, pc_colors, pc_sizes = load_pointcloud_with_targeting(session_dir, leaves_data, visited_leaves)
+    pc_x, pc_y, pc_z = load_pointcloud_with_targeting(session_dir, leaves_data, visited_leaves)
     
     # États par défaut "Aucune données chargées"
     time_data, fluor_data, fluor_config = [], [], {}
@@ -422,14 +555,12 @@ else:
     # Fallback données mock
     print("Aucune donnée de targeting, utilisation données mock")
     time_data, fluor_data, fluor_config = [0, 1, 2, 3, 4], [0.016, 0.008, 0.014, 0.009, 0.014], {}
-    
+
     n_points = 1000
     pc_x = np.random.normal(0.2, 0.1, n_points)
     pc_y = np.random.normal(0.2, 0.1, n_points)
     pc_z = np.random.uniform(0.0, 0.4, n_points)
-    pc_colors = ['black'] * n_points
-    pc_sizes = [1] * n_points
-    
+
     leaf_info = {
         "leaf_id": "MOCK_001",
         "centroid": [0.2, 0.2, 0.2],
@@ -457,17 +588,36 @@ app.layout = html.Div([
     # Sélection de session
     html.Div([
         html.H3("Session Selection", style={'margin': '0 0 10px 0', 'fontSize': '16px'}),
-        html.Label("Choisir une session:", style={'fontSize': '12px', 'marginBottom': '5px'}),
-        dcc.Dropdown(
-            id='session-selector',
-            options=find_all_targeting_sessions(),
-            value=find_all_targeting_sessions()[0]['value'] if find_all_targeting_sessions() and find_all_targeting_sessions()[0]['value'] else None,
-            placeholder="Sélectionner une session...",
-            style={'fontSize': '12px', 'marginBottom': '10px'}
-        ),
-        html.Div(id='current-session-info', 
-                children=f"Session actuelle : {targeting_data['session_dir'].name if targeting_data else 'Aucune'}", 
-                style={'fontSize': '11px', 'color': '#666'})
+        html.Div([
+            html.Label("Choisir une session:", style={'fontSize': '12px', 'marginBottom': '5px'}),
+            html.Div([
+                dcc.Dropdown(
+                    id='session-selector',
+                    options=find_all_targeting_sessions(),
+                    value=find_all_targeting_sessions()[0]['value'] if find_all_targeting_sessions() and find_all_targeting_sessions()[0]['value'] else None,
+                    placeholder="Sélectionner une session...",
+                    style={'fontSize': '12px', 'flex': '1'}
+                ),
+                html.Button("Actualiser", id='refresh-sessions-btn', n_clicks=0,
+                    title="Actualiser la liste des sessions",
+                    style={
+                        'fontSize': '12px',
+                        'padding': '0 14px',
+                        'cursor': 'pointer',
+                        'border': '1px solid #2d5016',
+                        'borderRadius': '4px',
+                        'backgroundColor': '#2d5016',
+                        'color': 'white',
+                        'fontWeight': 'bold',
+                        'marginLeft': '8px',
+                        'whiteSpace': 'nowrap',
+                        'height': '36px',
+                    }),
+            ], style={'display': 'flex', 'alignItems': 'center'}),
+        ]),
+        html.Div(id='current-session-info',
+                children=f"Session actuelle : {targeting_data['session_dir'].name if targeting_data else 'Aucune'}",
+                style={'fontSize': '11px', 'color': '#666', 'marginTop': '6px'})
     ], style={
         'border': '1px solid #000',
         'borderRadius': '5px',
@@ -478,28 +628,29 @@ app.layout = html.Div([
     
     # Signal invisible pour déclencher la mise à jour des callbacks
     html.Div(id='session-changed-signal', style={'display': 'none'}, children='0'),
-    
+
     html.Div([
         # Zone principale - Point Cloud (plus étroite)
         html.Div([
+            # Toggle vue
+            html.Div([
+                dcc.RadioItems(
+                    id='view-mode',
+                    options=[
+                        {'label': 'Segmentation', 'value': 'segmentation'},
+                        {'label': 'Mesures', 'value': 'visits'},
+                    ],
+                    value='segmentation',
+                    inline=True,
+                    style={'fontSize': '12px', 'padding': '6px 10px'}
+                ),
+            ], style={
+                'borderBottom': '1px solid #ddd',
+                'backgroundColor': '#f8f9fa',
+            }),
             dcc.Graph(
                 id='pointcloud-3d',
-                figure=go.Figure(data=[go.Scatter3d(
-                    x=pc_x, y=pc_y, z=pc_z,
-                    mode='markers',
-                    marker=dict(
-                        size=pc_sizes, 
-                        color=pc_colors,
-                        line=dict(width=0)  # Pas de contour pour les points
-                    ),
-                    name='Point Cloud',
-                    text=['Point cloud' if pc_colors[i] == 'black' else f'Feuille visitée' for i in range(len(pc_colors))],
-                    hovertemplate='<b>%{text}</b><br>X: %{x:.3f}<br>Y: %{y:.3f}<br>Z: %{z:.3f}<br><i>Cliquez pour sélectionner</i><extra></extra>'
-                )]).update_layout(
-                    scene=dict(aspectmode='data'),  # Respecte les proportions réelles des données
-                    margin=dict(l=0, r=0, b=0, t=30),
-                    title="Point Cloud 3D - Gradient Rouge→Vert (santé des feuilles)"
-                ),
+                figure=build_visits_figure(pc_x, pc_y, pc_z, leaves_data, visited_leaves),
                 style={'height': '500px', 'width': '100%'}
             )
         ], style={
@@ -723,71 +874,101 @@ def get_leaf_image_by_id(leaf_id, session_dir):
         print(f"Erreur chargement image feuille {leaf_id}: {e}")
         return None
 
+# Callback pour actualiser la liste des sessions
+@app.callback(
+    [Output('session-selector', 'options'),
+     Output('session-selector', 'value')],
+    [Input('refresh-sessions-btn', 'n_clicks')],
+    [State('session-selector', 'value')],
+    prevent_initial_call=True
+)
+def refresh_sessions(n_clicks, current_value):
+    sessions = find_all_targeting_sessions()
+    # Conserver la session courante si elle existe encore, sinon prendre la plus récente
+    existing_values = [s['value'] for s in sessions]
+    new_value = current_value if current_value in existing_values else (sessions[0]['value'] if sessions else None)
+    print(f"Sessions actualisées: {len(sessions)} session(s) trouvée(s)")
+    return sessions, new_value
+
+
 # Callback pour charger une session sélectionnée (dropdown direct)
 @app.callback(
-    [Output('pointcloud-3d', 'figure'),
-     Output('current-session-info', 'children'),
+    [Output('current-session-info', 'children'),
      Output('session-changed-signal', 'children')],
     [Input('session-selector', 'value')]
 )
 def load_selected_session(selected_session_path):
     if not selected_session_path:
         raise PreventUpdate
-    
+
     # Charger les nouvelles données de session
     new_targeting_data = load_targeting_data(selected_session_path)
-    
+
     if not new_targeting_data:
-        # Garder les données actuelles si erreur
         raise PreventUpdate
-    
+
     # Mettre à jour app_data globales
     app_data['targeting_data'] = new_targeting_data
     app_data['session_dir'] = new_targeting_data['session_dir']
     app_data['leaves_data'] = new_targeting_data['leaves_data']
     app_data['visited_leaves'] = new_targeting_data['visited_leaves']
-    app_data['current_leaf_id'] = None  # Réinitialiser - pas de feuille sélectionnée
-    
-    # Recharger le point cloud
-    pc_x, pc_y, pc_z, pc_colors, pc_sizes = load_pointcloud_with_targeting(
-        new_targeting_data['session_dir'], 
-        new_targeting_data['leaves_data'], 
-        new_targeting_data['visited_leaves']
-    )
-    
-    # Créer le nouveau graphique 3D
-    pointcloud_figure = go.Figure(data=[go.Scatter3d(
-        x=pc_x, y=pc_y, z=pc_z,
-        mode='markers',
-        marker=dict(
-            size=pc_sizes, 
-            color=pc_colors,
-            line=dict(width=0)
-        ),
-        name='Point Cloud',
-        text=['Point cloud' if pc_colors[i] == 'black' else f'Feuille visitée' for i in range(len(pc_colors))],
-        hovertemplate='<b>%{text}</b><br>X: %{x:.3f}<br>Y: %{y:.3f}<br>Z: %{z:.3f}<br><i>Cliquez pour sélectionner</i><extra></extra>'
-    )]).update_layout(
-        scene=dict(aspectmode='data'),  # Respecte les proportions réelles des données
-        margin=dict(l=0, r=0, b=0, t=30),
-        title="Point Cloud 3D - Gradient Rouge→Vert (santé des feuilles)"
-    )
-    
-    # Mise à jour du texte de session actuelle
+    app_data['current_leaf_id'] = None
+
     session_name = Path(selected_session_path).name
     session_info_text = f"Session actuelle : {session_name}"
-    
-    # Signal de changement (incrémente pour déclencher les autres callbacks)
-    import time
-    signal_value = str(int(time.time()))
-    
-    return pointcloud_figure, session_info_text, signal_value
+
+    import time as _time
+    signal_value = str(int(_time.time()))
+
+    return session_info_text, signal_value
+
+
+# Callback pointcloud — se déclenche sur changement de session ou de mode
+@app.callback(
+    Output('pointcloud-3d', 'figure'),
+    [Input('session-changed-signal', 'children'),
+     Input('view-mode', 'value')]
+)
+def update_pointcloud_figure(session_signal, view_mode):
+    """
+    Reconstruit la figure 3D uniquement quand la session ou le mode change.
+    En mode visits, relit le dossier images/ pour être à jour.
+    """
+    session_dir  = app_data.get('session_dir')
+    leaves_data  = app_data.get('leaves_data', {"leaves": []})
+
+    # Rafraîchir visited_leaves depuis le disque à chaque changement de mode/session
+    if session_dir:
+        images_dir = Path(session_dir) / "images"
+        visited = []
+        if images_dir.exists():
+            for img_file in images_dir.glob("leaf_*.jpg"):
+                parts = img_file.stem.split('_')
+                if len(parts) >= 2:
+                    try:
+                        visited.append(int(parts[1]))
+                    except ValueError:
+                        pass
+        app_data['visited_leaves'] = list(set(visited))
+
+    visited_leaves = app_data.get('visited_leaves', [])
+
+    pc_x, pc_y, pc_z = load_pointcloud_with_targeting(
+        session_dir, leaves_data, visited_leaves
+    )
+
+    if view_mode == 'segmentation' and session_dir:
+        return build_segmentation_figure(session_dir, leaves_data, pc_x, pc_y, pc_z)
+
+    return build_visits_figure(pc_x, pc_y, pc_z, leaves_data, visited_leaves)
+
 
 # Callback pour mise à jour des infos feuille
 @app.callback(
     Output('leaf-info-content', 'children'),
     [Input('pointcloud-3d', 'clickData'),
-     Input('session-changed-signal', 'children')]
+     Input('session-changed-signal', 'children')],
+    prevent_initial_call=True
 )
 def update_leaf_info(click_data, session_signal):
     # Chercher si une feuille a été cliquée
@@ -819,7 +1000,8 @@ def update_leaf_info(click_data, session_signal):
 @app.callback(
     Output('leaf-image-content', 'children'),
     [Input('pointcloud-3d', 'clickData'),
-     Input('session-changed-signal', 'children')]
+     Input('session-changed-signal', 'children')],
+    prevent_initial_call=True
 )
 def update_leaf_image(click_data, session_signal):
     # Chercher si une feuille a été cliquée
@@ -877,7 +1059,8 @@ def update_leaf_image(click_data, session_signal):
 @app.callback(
     Output('fluorescence-chart', 'figure'),
     [Input('pointcloud-3d', 'clickData'),
-     Input('session-changed-signal', 'children')]
+     Input('session-changed-signal', 'children')],
+    prevent_initial_call=True
 )
 def update_fluorescence_chart(click_data, session_signal):
     # Chercher si une feuille a été cliquée

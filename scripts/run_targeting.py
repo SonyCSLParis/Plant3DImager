@@ -21,7 +21,9 @@ def parse_arguments():
     """Parse command line arguments with unified fluorescence and photo options"""
     parser = argparse.ArgumentParser(description='Leaf targeting system with integrated fluorescence measurements')
     
-    parser.add_argument('point_cloud', help='Point cloud file (PLY/PCD)')
+    parser.add_argument('point_cloud', nargs='?', default=None,
+        help='Point cloud file (PLY/PCD). '
+             'If omitted, the latest PointCloud_*.ply in results/pointclouds/ is used.')
     parser.add_argument('--scale', type=float, default=0.001, help='Scale factor for point cloud (default: 0.001 = mm->m)')
     parser.add_argument('--alpha', type=float, default=0.1, help='Alpha value for Alpha Shape (default: 0.1)')
     parser.add_argument('--crop_method', choices=['none', 'top_percentage', 'single_furthest'], 
@@ -62,7 +64,8 @@ def main():
     
     # Display configuration
     print("Configuration:")
-    print(f"  Point cloud: {args.point_cloud}")
+    point_cloud_display = args.point_cloud if args.point_cloud else "(auto — latest in results/pointclouds/)"
+    print(f"  Point cloud: {point_cloud_display}")
     print(f"  Simulation mode: {args.simulate}")
     print(f"  Auto photo: {'Disabled' if args.no_photo else 'Enabled'}")
     

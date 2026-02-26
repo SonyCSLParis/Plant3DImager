@@ -18,7 +18,7 @@ FLUO_SEGMENTS_MAX = 16  # segments maximum
 FLUO_POINTS_MAX = 1999  # points totaux maximum
 
 # Paramètres par défaut pour mesures de ciblage
-FLUO_INTENSITY = 140  # Intensité LED pour mesures sur feuilles
+FLUO_INTENSITY = 20   # Intensité LED actinic pour mesures sur feuilles
 
 class FluoController(RcomClient):
     """
@@ -64,104 +64,110 @@ class FluoController(RcomClient):
     
     def create_measurement_sequence(self, pulse_intensity=None):
         """
-        Create standardized measurement sequence for leaf targeting
-        Sequence: 5s dark → 1min pulse at intensity → 1min dark at intensity 1
-        
+        Séquence de mesure pour le ciblage foliaire :
+          1. 10s  obscurité         (intensité = 0)
+          2. 0.6s pulse saturant    (intensité = 255)
+          3. 60s  actinic           (intensité = FLUO_INTENSITY)
+          4. 0.6s pulse saturant    (intensité = 255)
+          5. 60s  récupération      (intensité = 0)
+
         Args:
-            pulse_intensity (int): LED intensity 0-255 (default: FLUO_INTENSITY=140)
-            
+            pulse_intensity (int): intensité actinic phase 3 (défaut : FLUO_INTENSITY)
+
         Returns:
-            list: Sequence compatible with fluo:execute-sequence
+            list: séquence compatible avec fluo:execute-sequence
         """
         if pulse_intensity is None:
             pulse_intensity = FLUO_INTENSITY
-            
+
         sequence = [
             {
-                "num_points": 25,          # 5s à 5Hz
-                "frequency": FLUO_FREQUENCY_MAX, 
-                "actinic": 1               # Phase noire initiale
-            },
-            {
-                "num_points": 300,         # 60s à 5Hz
-                "frequency": FLUO_FREQUENCY_MAX, 
-                "actinic": pulse_intensity # Phase lumineuse
-            },
-            {
-                "num_points": 300,         # 60s à 5Hz  
+                "num_points": 75,                    # 15s à 5Hz
                 "frequency": FLUO_FREQUENCY_MAX,
-                "actinic": 1               # Phase noire finale
-            }
+                "actinic": 0                         # obscurité initiale
+            },
+            {
+                "num_points": 3,                     # 0.6s à 5Hz
+                "frequency": FLUO_FREQUENCY_MAX,
+                "actinic": 255                       # 1er pulse saturant
+            },
+            {
+                "num_points": 300,                   # 60s à 5Hz
+                "frequency": FLUO_FREQUENCY_MAX,
+                "actinic": pulse_intensity           # lumière actinic
+            },
+            {
+                "num_points": 3,                     # 0.6s à 5Hz
+                "frequency": FLUO_FREQUENCY_MAX,
+                "actinic": 255                       # 2e pulse saturant
+            },
+            {
+                "num_points": 300,                   # 60s à 5Hz
+                "frequency": FLUO_FREQUENCY_MAX,
+                "actinic": 0                         # récupération obscurité
+            },
         ]
-        
+
         return sequence
-    
+
     def measure_simple(self, pulse_intensity=None):
         """
         Perform leaf targeting fluorescence measurement with standard protocol
-        Protocol: 25 points dark (5s) + 300 points pulse (60s) + 300 points dark (60s) at 5Hz
-        
+        Protocol:
+          10s dark (0) + 0.6s sat pulse (255) + 60s actinic + 0.6s sat pulse (255) + 60s dark (0)
+          Total theoretical duration: 131.2s, 656 points at 5Hz
+
         Args:
-            pulse_intensity (int): LED intensity 0-255 (default: FLUO_INTENSITY=140)
-            
+            pulse_intensity (int): LED intensity 0-255 (default: FLUO_INTENSITY=20)
+
         Returns:
-            dict: Complete measurement result with:
-                - measurements: list of fluorescence values
-                - timestamps: timing for each point (seconds)
-                - sequence_params: measurement parameters
-                - timing_info: execution timing
-                - success: boolean result status
+            dict: Complete measurement result
         """
         if pulse_intensity is None:
             pulse_intensity = FLUO_INTENSITY
-            
+
         print(f"🔄 Starting leaf fluorescence measurement (intensity={pulse_intensity})...")
-        
+
         try:
-            # Créer séquence standardisée
             sequence = self.create_measurement_sequence(pulse_intensity)
-            
-            # Timing début
+
             start_time = time.time()
-            
-            # Exécution via RCom
             result = self.execute("fluo:execute-sequence", {"sequence": sequence})
-            
-            # Timing fin
             execution_time = time.time() - start_time
-            
+
             if isinstance(result, dict) and "measurements" in result:
                 measurements = result.get("measurements", [])
-                timestamps = result.get("timestamps", 
-                    [i * 0.2 for i in range(len(measurements))])  # 5Hz = 0.2s
-                
-                # Construction résultat enrichi
+                timestamps = result.get("timestamps",
+                    [i * (1.0 / FLUO_FREQUENCY_MAX) for i in range(len(measurements))])
+
                 measurement_result = {
                     "success": True,
                     "measurements": measurements,
                     "timestamps": timestamps,
                     "sequence_params": {
                         "pulse_intensity": pulse_intensity,
-                        "dark_intensity": 1,
-                        "initial_dark_duration": 5.0,   # 25 points * 0.2s
-                        "pulse_duration": 60.0,         # 300 points * 0.2s
-                        "final_dark_duration": 60.0,    # 300 points * 0.2s
+                        "sat_pulse_intensity": 255,
+                        "dark_intensity": 0,
+                        "initial_dark_duration": 15.0,    # 75 points * 0.2s
+                        "sat_pulse_duration": 0.6,        # 3 points * 0.2s
+                        "actinic_duration": 60.0,         # 300 points * 0.2s
+                        "recovery_duration": 60.0,        # 300 points * 0.2s
                         "frequency": FLUO_FREQUENCY_MAX,
                         "total_points": len(measurements),
                         "segments_count": len(sequence)
                     },
                     "timing_info": {
                         "execution_time": execution_time,
-                        "theoretical_duration": 125.0,  # 5.0 + 60.0 + 60.0
+                        "theoretical_duration": 136.2,   # 15 + 0.6 + 60 + 0.6 + 60
                         "start_timestamp": datetime.now().isoformat()
                     },
                     "device_info": "Ambit Fluorescence Sensor",
                     "pattern_type": "leaf_targeting_measurement"
                 }
-                
+
                 print(f"✅ Fluorescence completed: {len(measurements)} points, {execution_time:.1f}s")
                 return measurement_result
-                
+
             else:
                 print("❌ Error: Invalid response from sensor")
                 return {
@@ -171,7 +177,7 @@ class FluoController(RcomClient):
                     "error": "Invalid sensor response",
                     "timing_info": {"execution_time": execution_time}
                 }
-                
+
         except Exception as e:
             print(f"❌ Error during fluorescence measurement: {e}")
             return {

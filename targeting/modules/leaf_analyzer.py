@@ -1,382 +1,318 @@
-# modules/leaf_analyzer.py
-import numpy as np
-import open3d as o3d
-from scipy.spatial import cKDTree
-import networkx as nx
-import random
-import time
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
-try:
-    import community as community_louvain
-    LOUVAIN_AVAILABLE = True
-except ImportError:
-    LOUVAIN_AVAILABLE = False
-    print("ERROR: 'python-louvain' package is not installed.")
-    print("To install: pip install python-louvain")
+"""
+Leaf detection — graph-based clustering, fully ARM-compatible.
+Remplace open3d KDTree par scipy.spatial.cKDTree (ARM-safe).
+"""
+
+import os
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["OMP_NUM_THREADS"] = "1"
+
+import time
+import numpy as np
+import open3d
+from scipy.sparse import lil_matrix
+from scipy.sparse.csgraph import connected_components
+from scipy.spatial import cKDTree
+
+from targeting.modules.seg_cov import get_labels
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 1 — Background separation
+# ─────────────────────────────────────────────────────────────────────────────
+
+def separate_plant_from_background(pcd, points, k_kmeans=3):
+    """
+    KMeans 3D sur coordonnees normalisees — ARM-safe, pas d'eigh.
+    Le plus grand cluster = plante.
+    pcd/points en metres, get_labels attend du mm → pcd_mm temporaire.
+    """
+    print(f"  Separating plant from background "
+          f"({len(points)} points, k={k_kmeans})...")
+    t0 = time.time()
+
+    pcd_mm = open3d.geometry.PointCloud()
+    pcd_mm.points = open3d.utility.Vector3dVector(points * 1000.0)
+
+    labels = get_labels(pcd_mm, k=k_kmeans)
+
+    counts = np.bincount(labels)
+    largest_label = np.argmax(counts)
+    print(f"  Done in {time.time()-t0:.1f}s — cluster sizes: {counts.tolist()}")
+    print(f"  Keeping cluster {largest_label} as plant ({counts[largest_label]} pts)")
+
+    mask = labels == largest_label
+    return points[mask], np.where(mask)[0]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 2 — KNN graph + connected components (scipy cKDTree — ARM-safe)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def cluster_by_graph(plant_points, k_neighbors=150, max_distance=0.002):
+    """
+    Graphe KNN symetrique via scipy.spatial.cKDTree + composantes connexes.
+    Remplace open3d KDTreeFlann qui segfault sur ARM (open3d 0.18 / Pi OS).
+    """
+    n = len(plant_points)
+    print(f"  Building KNN graph ({n} pts, k={k_neighbors}, "
+          f"max_d={max_distance*1000:.1f} mm)...")
+    t0 = time.time()
+
+    tree = cKDTree(plant_points)
+
+    # query_ball_point retourne pour chaque point ses voisins dans max_distance
+    # Plus efficace que KNN + filtre distance pour ce cas d'usage
+    neighbors = tree.query_ball_point(plant_points, r=max_distance, workers=-1)
+
+    adj = lil_matrix((n, n), dtype=np.uint8)
+    for i, neigh in enumerate(neighbors):
+        for j in neigh:
+            if j != i:
+                adj[i, j] = 1
+                adj[j, i] = 1
+
+    print(f"  Graph built in {time.time()-t0:.1f}s")
+    n_clusters, labels = connected_components(adj, directed=False)
+
+    counts = np.bincount(labels)
+    top    = np.argsort(counts)[::-1][:10]
+    print(f"  {n_clusters} components — top sizes: {[counts[c] for c in top]}")
+
+    return labels, n_clusters
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 3 — Filter small clusters
+# ─────────────────────────────────────────────────────────────────────────────
+
+def filter_small_clusters(plant_points, labels, min_cluster_size=1000):
+    counts = np.bincount(labels)
+    large  = np.where(counts >= min_cluster_size)[0]
+    print(f"  Clusters >= {min_cluster_size} pts: {len(large)} "
+          f"(discarding {len(counts)-len(large)})")
+
+    mask            = np.isin(labels, large)
+    pts_filtered    = plant_points[mask]
+    labels_filtered = labels[mask]
+
+    unique          = np.unique(labels_filtered)
+    remap           = {old: new for new, old in enumerate(unique)}
+    labels_remapped = np.array([remap[l] for l in labels_filtered])
+
+    print(f"  {len(pts_filtered)} pts kept in {len(unique)} clusters")
+    return pts_filtered, labels_remapped
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 4 — Centroids and normals via PCA
+# (~15-20 appels seulement — pas de risque OpenBLAS)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compute_centroids_and_normals(pts_filtered, labels_remapped):
+    n_clusters = labels_remapped.max() + 1
+    centroids  = np.zeros((n_clusters, 3))
+    normals    = np.zeros((n_clusters, 3))
+
+    for i in range(n_clusters):
+        pts   = pts_filtered[labels_remapped == i]
+        mean  = np.mean(pts, axis=0)
+        dists = np.linalg.norm(pts - mean, axis=1)
+        centroids[i] = pts[np.argmin(dists)]
+
+        centered = pts - centroids[i]
+        cov      = np.cov(centered.T)
+        _, evecs = np.linalg.eigh(cov)
+        normals[i] = evecs[:, 0]  # orientation corrigée par _orient_outward ensuite
+
+    return centroids, normals
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 5 — Merge parallel and spatially close clusters (Union-Find)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def merge_parallel_clusters(centroids, normals, labels_remapped, pts_filtered,
+                             angle_threshold_deg=15.0, distance_threshold=0.015):
+    n          = len(centroids)
+    cos_thresh = np.cos(np.radians(angle_threshold_deg))
+    parent     = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        parent[find(a)] = find(b)
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if np.linalg.norm(centroids[i] - centroids[j]) > distance_threshold:
+                continue
+            if abs(np.dot(normals[i], normals[j])) >= cos_thresh:
+                union(i, j)
+
+    root_map = {}
+    new_idx  = 0
+    for i in range(n):
+        r = find(i)
+        if r not in root_map:
+            root_map[r] = new_idx
+            new_idx += 1
+
+    new_labels    = np.array([root_map[find(l)] for l in labels_remapped])
+    n_new         = new_idx
+    new_centroids = np.zeros((n_new, 3))
+    new_normals   = np.zeros((n_new, 3))
+
+    for i in range(n_new):
+        pts   = pts_filtered[new_labels == i]
+        mean  = np.mean(pts, axis=0)
+        dists = np.linalg.norm(pts - mean, axis=1)
+        new_centroids[i] = pts[np.argmin(dists)]
+
+        centered = pts - new_centroids[i]
+        cov      = np.cov(centered.T)
+        _, evecs = np.linalg.eigh(cov)
+        new_normals[i] = evecs[:, 0]  # orientation corrigée par _orient_outward ensuite
+
+    print(f"  After merge: {n_new} clusters (was {n})")
+    return new_labels, new_centroids, new_normals
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 6 — Build output dicts
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _orient_outward(normal, centroid, all_points):
+    plant_center    = np.mean(all_points, axis=0)
+    plant_center[2] = np.min(all_points[:, 2])
+    if np.dot(normal, plant_center - centroid) > 0:
+        normal = -normal
+    return normal
+
+
+def _plane_eq(normal, point):
+    d = -float(np.dot(normal, point))
+    return [float(normal[0]), float(normal[1]), float(normal[2]), d]
+
+
+def _target_point(centroid, normal, distance):
+    return (np.asarray(centroid) + np.asarray(normal) * distance).tolist()
+
+
+def build_leaves_data(pts_filtered, labels_remapped, centroids, normals,
+                      all_points, distance=0.1):
+    n_clusters  = labels_remapped.max() + 1
+    leaves_data = []
+
+    print(f"\n  Building leaf data — {n_clusters} leaves, "
+          f"target distance = {distance*100:.1f} cm")
+
+    for i in range(n_clusters):
+        mask            = labels_remapped == i
+        cluster_pts     = pts_filtered[mask]
+        cluster_indices = np.where(mask)[0].tolist()
+
+        centroid = centroids[i].copy()
+        normal   = normals[i].copy()
+
+        n_len = np.linalg.norm(normal)
+        if n_len > 1e-6:
+            normal = normal / n_len
+
+        normal = _orient_outward(normal, centroid, all_points)
+
+        leaf = {
+            "id"            : i + 1,
+            "centroid"      : centroid.tolist(),
+            "normal"        : normal.tolist(),
+            "plane_equation": _plane_eq(normal, centroid),
+            "inlier_ratio"  : 1.0,
+            "points_indices": cluster_indices,
+            "points"        : cluster_pts.tolist(),
+            "target_point"  : _target_point(centroid, normal, distance),
+        }
+        leaves_data.append(leaf)
+
+        print(f"    Leaf {leaf['id']:2d}: {len(cluster_pts):5d} pts | "
+              f"centroid={np.round(centroid,3)} | normal={np.round(normal,3)}")
+
+    return leaves_data
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Public entry point
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_leaves(pcd, points,
+                  k_kmeans=3,
+                  k_neighbors=150,
+                  max_distance=0.002,
+                  min_cluster_size=1000,
+                  angle_threshold_deg=15.0,
+                  merge_distance_threshold=0.015,
+                  distance=0.1):
+    """
+    Pipeline complet de detection des feuilles.
+    100% ARM-compatible — open3d KDTree remplace par scipy cKDTree.
+    """
+    print("\n" + "="*55)
+    print(" Leaf detection  —  graph clustering (ARM-safe)")
+    print("="*55)
+
+    print("\n[1/5] Background separation (KMeans)...")
+    plant_points, _ = separate_plant_from_background(pcd, points, k_kmeans)
+
+    print("\n[2/5] Graph-based instance clustering (scipy cKDTree)...")
+    labels, _ = cluster_by_graph(plant_points, k_neighbors, max_distance)
+
+    print("\n[3/5] Filtering small clusters...")
+    pts_filtered, labels_remapped = filter_small_clusters(
+        plant_points, labels, min_cluster_size
+    )
+
+    if len(pts_filtered) == 0:
+        print("WARNING: No clusters survive filtering. "
+              "Consider reducing --min_cluster_size.")
+        return []
+
+    print("\n[4/5] Computing centroids and normals (PCA)...")
+    centroids, normals = compute_centroids_and_normals(pts_filtered, labels_remapped)
+
+    print("\n[5/5] Merging parallel clusters...")
+    labels_remapped, centroids, normals = merge_parallel_clusters(
+        centroids, normals, labels_remapped, pts_filtered,
+        angle_threshold_deg, merge_distance_threshold
+    )
+
+    leaves_data = build_leaves_data(
+        pts_filtered, labels_remapped, centroids, normals, points, distance
+    )
+
+    print(f"\n{'='*55}")
+    print(f" Detection complete: {len(leaves_data)} leaves found")
+    print(f"{'='*55}\n")
+    return leaves_data
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Backward-compatibility stubs
+# ─────────────────────────────────────────────────────────────────────────────
 
 def calculate_adaptive_radius(points):
-    """
-    Calculate adaptive connectivity radius
-    """
-    if len(points) < 10:
-        return 0.01
-    
-    # Sample to speed up calculation
-    sample_size = min(1000, len(points))
-    sample_indices = np.random.choice(len(points), sample_size, replace=False)
-    sample_points = points[sample_indices]
-    
-    # Create KDTree on ALL original points
-    full_tree = cKDTree(points)
-    
-    # For each sampled point, find its nearest neighbor
-    all_distances = []
-    for point in sample_points:
-        # Find 2 nearest neighbors (first being the point itself)
-        distances, _ = full_tree.query(point, k=2)
-        # Ignore self-distance (first distance = 0)
-        neighbor_distance = distances[1]
-        all_distances.append(neighbor_distance)
-    
-    # Calculate average distance to first nearest neighbor
-    avg_1nn = np.mean(all_distances)
-    
-    # Adaptive radius: 5x average distance to nearest neighbor
-    adaptive_radius = avg_1nn * 5.0
-    
-    print(f"1st neighbor distance: {avg_1nn*1000:.2f} mm")
-    print(f"Adaptive radius: {adaptive_radius*1000:.2f} mm")
-    
-    return adaptive_radius
-
-def calculate_auto_louvain_coefficient(points):
-    """
-    Calculate automatic Louvain coefficient based on density
-    Adapted from alpha_louvain_interactive.py
-    """
-    # Calculate bounding box volume
-    min_bound = np.min(points, axis=0)
-    max_bound = np.max(points, axis=0)
-    dimensions = max_bound - min_bound
-    volume = np.prod(dimensions)
-    
-    # Calculate density (points per m³)
-    density = len(points) / volume if volume > 0 else 1
-    
-    # Coefficient based on log10 of density divided by 2
-    auto_coeff = max(0.1, np.log10(density) / 2)
-    
-    print(f"Points: {len(points)}")
-    print(f"Volume: {volume:.6f} m³")
-    print(f"Density: {density:.2f} points/m³")
-    print(f"Auto coefficient: {auto_coeff:.2f}")
-    
-    return auto_coeff
+    raise DeprecationWarning("Use detect_leaves() instead.")
 
 def build_connectivity_graph(points, radius):
-    """
-    Build connectivity graph
-    Adapted from alpha_louvain_interactive.py
-    """
-    start_time = time.time()
-    
-    # Create empty graph
-    graph = nx.Graph()
-    
-    # Add nodes (one per point)
-    for i in range(len(points)):
-        graph.add_node(i)
-    
-    # Use KDTree for efficient neighbor search
-    tree = cKDTree(points)
-    
-    # For each point, find neighbors within specified radius
-    for i in range(len(points)):
-        # Find indices of neighbors
-        indices = tree.query_ball_point(points[i], radius)
-        
-        # Add edges to neighbors
-        for j in indices:
-            if i < j:  # To avoid duplicates
-                # Calculate Euclidean distance
-                dist = np.linalg.norm(points[i] - points[j])
-                
-                # Weight is inverse of distance
-                weight = 1.0 / max(dist, 1e-6)
-                
-                graph.add_edge(i, j, weight=weight)
-        
-        # Display progress
-        if i % 5000 == 0 or i == len(points) - 1:
-            print(f"  Progress: {i+1}/{len(points)} points")
-    
-    print(f"Graph: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
-    print(f"Time: {time.time() - start_time:.2f}s")
-    
-    return graph
+    raise DeprecationWarning("Use detect_leaves() instead.")
 
 def detect_communities_louvain_multiple(graph, resolution, min_size, n_iterations=5):
-    """
-    Detect communities with randomized Louvain
-    Adapted from alpha_louvain_interactive.py
-    """
-    if not LOUVAIN_AVAILABLE:
-        print("Error: python-louvain module not available")
-        return []
-        
-    if n_iterations <= 0:
-        print("ERROR: Number of iterations must be positive.")
-        return []
-    
-    best_partition = None
-    best_modularity = -1
-    best_communities = []
-    
-    print(f"Running Louvain {n_iterations} times with random order...")
-    
-    # Create copy of graph to avoid modifying it
-    graph_copy = graph.copy()
-    
-    for i in range(n_iterations):
-        start_time = time.time()
-        
-        # Randomly reorder nodes
-        shuffled_nodes = list(graph_copy.nodes())
-        random.shuffle(shuffled_nodes)
-        
-        # Create mapping dictionary
-        node_map = {old: new for new, old in enumerate(shuffled_nodes)}
-        reverse_map = {new: old for new, old in enumerate(shuffled_nodes)}
-        
-        # Create new graph with reordered nodes
-        shuffled_graph = nx.Graph()
-        for old_u, old_v, data in graph_copy.edges(data=True):
-            new_u, new_v = node_map[old_u], node_map[old_v]
-            shuffled_graph.add_edge(new_u, new_v, **data)
-        
-        # Run Louvain on reordered graph
-        partition = community_louvain.best_partition(shuffled_graph, resolution=resolution)
-        
-        # Calculate modularity of this partition
-        modularity = community_louvain.modularity(partition, shuffled_graph)
-        
-        # Map partition to original nodes
-        original_partition = {reverse_map[node]: comm for node, comm in partition.items()}
-        
-        # If this is best modularity so far, keep it
-        if modularity > best_modularity:
-            best_modularity = modularity
-            best_partition = original_partition
-        
-        print(f"  Iteration {i+1}/{n_iterations}: Modularity = {modularity:.4f}, Time = {time.time() - start_time:.2f}s")
-    
-    print(f"Best modularity: {best_modularity:.4f}")
-    
-    # Group nodes by community
-    communities = {}
-    for node, community_id in best_partition.items():
-        if community_id not in communities:
-            communities[community_id] = set()
-        communities[community_id].add(node)
-    
-    # Filter out communities that are too small
-    filtered_communities = [comm for comm in communities.values() if len(comm) >= min_size]
-    
-    # Sort by decreasing size
-    sorted_communities = sorted(filtered_communities, key=len, reverse=True)
-    
-    print(f"Total communities: {len(communities)}")
-    print(f"Communities >= {min_size} points: {len(filtered_communities)}")
-    
-    # Display statistics about communities
-    if sorted_communities:
-        print("Top 5 communities:")
-        for i, comm in enumerate(sorted_communities[:5]):
-            print(f"  {i+1}: {len(comm)} points")
-    
-    return sorted_communities
-
-def fit_plane_to_points(points, all_points=None, distance_threshold=0.005, ransac_n=3, num_iterations=1000):
-    """
-    Fit plane to a set of points via RANSAC and orient normal outward
-    
-    Args:
-        points: Community points (leaf)
-        all_points: All cloud points (to calculate plant center)
-        distance_threshold: Distance threshold for RANSAC
-        ransac_n: Number of points for RANSAC
-        num_iterations: Number of iterations for RANSAC
-        
-    Returns:
-        Dictionary with plane information
-    """
-    if len(points) < 3:
-        print("Not enough points to fit plane")
-        return {
-            'normal': np.array([0, 0, 1]),
-            'centroid': np.mean(points, axis=0) if len(points) > 0 else np.array([0, 0, 0]),
-            'equation': [0, 0, 1, 0],
-            'inlier_ratio': 0,
-            'inliers': []
-        }
-    
-    # Determine plant center (centroid of all points)
-    if all_points is None:
-        # If all_points not provided, use XY centroid of points as reference
-        # but with minimum Z height
-        xy_centroid = np.mean(points[:, :2], axis=0)
-        min_z = np.min(points[:, 2])
-        plant_center = np.array([xy_centroid[0], xy_centroid[1], min_z])
-    else:
-        # Use centroid of all points as plant center
-        plant_center = np.mean(all_points, axis=0)
-    
-    # Create Open3D point cloud
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(points)
-    
-    # Estimate normals
-    pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.02, max_nn=30))
-    
-    # Fit plane with RANSAC
-    try:
-        plane_model, inliers = pcd.segment_plane(distance_threshold=distance_threshold,
-                                               ransac_n=ransac_n,
-                                               num_iterations=num_iterations)
-        
-        # Extract plane parameters: ax + by + cz + d = 0
-        [a, b, c, d] = plane_model
-        
-        # Normalize normal vector
-        normal = np.array([a, b, c])
-        normal_length = np.linalg.norm(normal)
-        if normal_length > 0:
-            normal = normal / normal_length
-        
-        # Calculate inlier percentage
-        inlier_ratio = len(inliers) / len(points) if len(points) > 0 else 0
-        
-        # Calculate centroid
-        centroid = np.mean(points, axis=0)
-        
-        # Check normal orientation (to point "outward")
-        direction_to_center = plant_center - centroid
-        
-        # If normal points toward center, invert it
-        # Use margin to avoid edge cases
-        dot_product = np.dot(normal, direction_to_center)
-        if dot_product > 0.1 * np.linalg.norm(direction_to_center):
-            normal = -normal
-            a, b, c = -a, -b, -c
-            d = -d
-        
-        # Create results dictionary
-        plane_info = {
-            'normal': normal,
-            'centroid': centroid,
-            'equation': [a, b, c, d],
-            'inlier_ratio': inlier_ratio,
-            'inliers': inliers
-        }
-        
-        return plane_info
-        
-    except Exception as e:
-        print(f"Error fitting plane: {e}")
-        # Return default normal (upward)
-        return {
-            'normal': np.array([0, 0, 1]),
-            'centroid': np.mean(points, axis=0),
-            'equation': [0, 0, 1, 0],
-            'inlier_ratio': 0,
-            'inliers': []
-        }
-
-def calculate_target_point(leaf_data, distance=0.10):
-    """
-    Calculate target point at given distance from leaf plane
-    
-    Args:
-        leaf_data: Dictionary containing leaf data
-        distance: Desired distance from plane (in meters)
-    
-    Returns:
-        Target point coordinates [x, y, z]
-    """
-    centroid = np.array(leaf_data['centroid'])
-    normal = np.array(leaf_data['normal'])
-    
-    # Calculate target point by following normal
-    target_point = centroid + normal * distance
-    
-    return target_point.tolist()
+    raise DeprecationWarning("Use detect_leaves() instead.")
 
 def extract_leaf_data_from_communities(communities, points, min_inlier_ratio=0.7, distance=0.1):
-    """
-    Extract leaf data from detected communities
-    
-    Args:
-        communities: List of communities (sets of indices)
-        points: Complete point cloud
-        min_inlier_ratio: Minimum inlier ratio to consider surface valid
-        distance: Distance to leaves in meters for target point calculation
-    
-    Returns:
-        List of leaf data in standardized format
-    """
-    leaves_data = []
-    
-    # Calculate approximate plant center
-    plant_center = np.mean(points, axis=0)
-    # Use minimum height for center (plant base)
-    plant_center[2] = np.min(points[:, 2])
-    
-    print(f"\nUsing distance of {distance*100:.1f} cm for target point calculation")
-    
-    for i, community in enumerate(communities):
-        # Extract points for this community
-        comm_indices = list(community)
-        comm_points = points[comm_indices]
-        
-        # Calculate centroid
-        centroid = np.mean(comm_points, axis=0)
-        
-        # Fit plane to community passing all points
-        plane_info = fit_plane_to_points(comm_points, points)
-        
-        # Check if plane is good quality
-        if plane_info['inlier_ratio'] < min_inlier_ratio:
-            print(f"Community {i+1}: Inlier ratio too low ({plane_info['inlier_ratio']:.2f})")
-            continue
-        
-        # Double-check normal orientation outward
-        direction_to_center = plant_center - centroid
-        dot_product = np.dot(plane_info['normal'], direction_to_center)
-        if dot_product > 0:
-            # Normal still points toward center - invert it
-            normal = -np.array(plane_info['normal'])
-            plane_info['normal'] = normal
-            # Also invert plane equation
-            a, b, c, d = plane_info['equation']
-            plane_info['equation'] = [-a, -b, -c, -d]
-            print(f"Community {i+1}: Normal reoriented outward")
-        
-        # Calculate target point at specified distance from leaf
-        target_point = calculate_target_point(plane_info, distance=distance)
-        
-        # Create entry for this leaf
-        leaf_data = {
-            "id": i + 1,  # ID starting at 1
-            "centroid": centroid.tolist(),
-            "normal": plane_info["normal"].tolist(),
-            "plane_equation": plane_info["equation"],
-            "inlier_ratio": plane_info["inlier_ratio"],
-            "points_indices": comm_indices,
-            "points": comm_points.tolist(),
-            "target_point": target_point
-        }
-        
-        leaves_data.append(leaf_data)
-    
-    print(f"Extracted leaves: {len(leaves_data)}")
-    return leaves_data
+    raise DeprecationWarning("Use detect_leaves() instead.")
