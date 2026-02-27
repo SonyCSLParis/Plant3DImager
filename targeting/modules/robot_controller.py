@@ -254,6 +254,41 @@ class RobotController:
             traceback.print_exc()
             return False
     
+    @staticmethod
+    def compute_fluorescence_metrics(measurements):
+        """
+        Calcule Fv/Fm, F_m et NPQ depuis les mesures brutes.
+
+        Protocole attendu (5Hz) :
+          [0-74]   : dark initial (75 pts)
+          [75-77]  : pulse saturant 1 (3 pts)  → F_m
+          [78-377] : actinic (300 pts)          → F_s (état stationnaire)
+          [378-380]: pulse saturant 2 (3 pts)   → F_m'
+          [381-680]: récupération (300 pts)
+
+        Returns:
+            dict avec fvfm, f_m, npq (None si calcul impossible)
+        """
+        m = np.array(measurements)
+        metrics = {"fvfm": None, "f_m": None, "npq": None}
+
+        try:
+            F_0  = float(np.mean(m[70:75]))       # dark initial (derniers pts)
+            F_m  = float(np.mean(m[75:78]))        # 1er pulse saturant
+            F_s  = float(np.mean(m[370:378]))      # état stationnaire fin actinic
+            F_mp = float(np.mean(m[378:381]))      # 2e pulse saturant (Fm')
+
+            if F_m > 0:
+                metrics["fvfm"] = round((F_m - F_0) / F_m, 6)
+                metrics["f_m"]  = round(F_m, 6)
+            if F_mp > 0:
+                metrics["npq"]  = round((F_m - F_mp) / F_mp, 6)
+
+        except Exception as e:
+            print(f"Warning: could not compute fluorescence metrics: {e}")
+
+        return metrics
+
     def save_fluorescence_data(self, fluo_result, leaf_id, position, leaf_index):
         """
         Save enriched fluorescence measurements to JSON file
@@ -277,6 +312,10 @@ class RobotController:
         device_info = fluo_result.get('device_info', 'Unknown sensor')
         pattern_type = fluo_result.get('pattern_type', 'unknown')
         
+        # Calculer métriques fluorescence
+        metrics = self.compute_fluorescence_metrics(measurements)
+        print(f"  Fv/Fm={metrics['fvfm']}  F_m={metrics['f_m']}  NPQ={metrics['npq']}")
+
         # JSON enrichi combinant robot + capteur
         enriched_fluo_data = {
             # Données robot (format original)
@@ -285,7 +324,7 @@ class RobotController:
             "leaf_index": leaf_index,
             "position": {
                 "x": position['x'],
-                "y": position['y'], 
+                "y": position['y'],
                 "z": position['z']
             },
             "camera_angles": {
@@ -300,32 +339,55 @@ class RobotController:
                 "min": float(np.min(measurements)) if measurements else 0,
                 "max": float(np.max(measurements)) if measurements else 0
             },
-            
+
+            # Métriques fluorescence calculées
+            "fvfm":  metrics["fvfm"],
+            "f_m":   metrics["f_m"],
+            "npq":   metrics["npq"],
+
             # Nouvelles données capteur (enrichissement)
             "timestamps": timestamps,
             "sequence_params": sequence_params,
             "timing_info": timing_info,
             "device_info": device_info,
             "pattern_type": pattern_type,
-            
+
             # Métadonnées intégration
             "format_version": "2.0",
             "integration": "ROMI_leaf_targeting"
         }
-        
+
         # Save to file
         if self.analysis_dir:
             timestamp_safe = timestamp.replace(':', '-')
             filename = f"fluorescence_leaf_{enriched_fluo_data['leaf_id']}_{timestamp_safe}.json"
             filepath = os.path.join(self.analysis_dir, filename)
-            
+
             try:
                 with open(filepath, 'w') as f:
                     json.dump(enriched_fluo_data, f, indent=2)
                 print(f"Enriched fluorescence data saved: {filepath}")
             except Exception as e:
                 print(f"Warning: Could not save fluorescence data: {e}")
-        
+
+            # Mettre à jour leaves_data.json avec les métriques
+            leaves_json_path = os.path.join(self.analysis_dir, "leaves_data.json")
+            if os.path.exists(leaves_json_path) and metrics["fvfm"] is not None:
+                try:
+                    with open(leaves_json_path, 'r') as f:
+                        leaves_data = json.load(f)
+                    for leaf in leaves_data.get("leaves", []):
+                        if leaf["id"] == leaf_id:
+                            leaf["fvfm"] = metrics["fvfm"]
+                            leaf["f_m"]  = metrics["f_m"]
+                            leaf["npq"]  = metrics["npq"]
+                            break
+                    with open(leaves_json_path, 'w') as f:
+                        json.dump(leaves_data, f, indent=2)
+                    print(f"leaves_data.json updated with metrics for leaf {leaf_id}")
+                except Exception as e:
+                    print(f"Warning: Could not update leaves_data.json: {e}")
+
         return enriched_fluo_data
     
     def shutdown(self):

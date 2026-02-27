@@ -14,7 +14,6 @@ import sys
 import argparse
 import numpy as np
 import time
-import random
 import shutil
 
 # Core imports
@@ -33,34 +32,6 @@ from targeting.modules.interactive_selector import select_leaf_with_matplotlib
 from targeting.modules.path_planner import plan_complete_path
 from targeting.modules.robot_controller import RobotController
 from targeting.modules.visualization import visualize_complete_path
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Health status from fluorescence
-# ─────────────────────────────────────────────────────────────────────────────
-
-HEALTH_THRESHOLDS = {
-    "Critique" : 0.010,
-    "Stressé"  : 0.015,
-    "Normal"   : 0.020,
-    "Bon"      : 0.025,
-    "Excellent": float('inf'),
-}
-
-HEALTH_COLORS = {
-    "Critique" : "#D32F2F",
-    "Stressé"  : "#FF7043",
-    "Normal"   : "#FFA726",
-    "Bon"      : "#66BB6A",
-    "Excellent": "#2E7D32",
-}
-
-
-def calculate_health_from_fluorescence(mean_fluorescence):
-    for status, threshold in HEALTH_THRESHOLDS.items():
-        if mean_fluorescence < threshold:
-            return status
-    return "Excellent"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -222,17 +193,6 @@ class LeafTargeting:
             self.shutdown()
             return False
 
-    # ── Mock health status (POC) ──────────────────────────────────────────────
-
-    def _calculate_health_status_from_fluorescence(self):
-        print("Assigning mock fluorescence health status (POC mode)...")
-        for leaf in self.leaves_data:
-            mock_val = 0.005 + np.random.random() * 0.025
-            leaf["fluorescence_mean"] = mock_val
-            leaf["health_status"] = calculate_health_from_fluorescence(mock_val)
-            print(f"  Leaf {leaf.get('id','?')}: "
-                  f"fluor={mock_val:.4f} → {leaf['health_status']}")
-
     # ── Main pipeline ─────────────────────────────────────────────────────────
 
     def run_targeting(self):
@@ -264,10 +224,7 @@ class LeafTargeting:
                 print("ERROR: No leaves detected. Adjust detection parameters.")
                 return False
 
-            # ── 3. Health status (POC) ────────────────────────────────────────
-            self._calculate_health_status_from_fluorescence()
-
-            # ── 4. Save leaf data ─────────────────────────────────────────────
+            # ── 3. Save leaf data ─────────────────────────────────────────────
             leaves_json = os.path.join(
                 self.session_dirs["analysis"], "leaves_data.json"
             )
@@ -280,7 +237,7 @@ class LeafTargeting:
             self.storage.save_segmentation_pointcloud(self.leaves_data, seg_ply, seg_labels)
 
             # ── 5. Copy point cloud for viewer ───────────────────────────────
-            print("\n=== 3. Copying point cloud for viewer ===")
+            print("\n=== 4. Copying point cloud for viewer ===")
             pointcloud_copy = os.path.join(
                 self.session_dirs["main"], "pointcloud.ply"
             )
@@ -288,7 +245,7 @@ class LeafTargeting:
             print(f"  Copied: {pointcloud_copy}")
 
             # ── 6. Interactive leaf selection ─────────────────────────────────
-            print("\n=== 4. Interactive leaf selection ===")
+            print("\n=== 5. Interactive leaf selection ===")
             self.selected_leaves = select_leaf_with_matplotlib(
                 self.leaves_data, self.points, self.session_dirs["visualizations"]
             )
@@ -298,7 +255,7 @@ class LeafTargeting:
                 return True
 
             # ── 7. Path planning ──────────────────────────────────────────────
-            print("\n=== 5. Planning trajectory ===")
+            print("\n=== 6. Planning trajectory ===")
             current_position = [0, 0, 0]
             if not self.simulate and self.cnc:
                 pos = self.cnc.get_position()
@@ -307,7 +264,7 @@ class LeafTargeting:
             complete_path = plan_complete_path(current_position, self.selected_leaves)
 
             # ── 8. Trajectory visualization ───────────────────────────────────
-            print("\n=== 6. Visualizing trajectory ===")
+            print("\n=== 7. Visualizing trajectory ===")
             leaf_points_list  = []
             leaf_normals_list = []
             for leaf in self.selected_leaves:
@@ -333,7 +290,7 @@ class LeafTargeting:
                 return True
 
             # ── 9. Execute trajectory ─────────────────────────────────────────
-            print("\n=== 7. Executing trajectory ===")
+            print("\n=== 8. Executing trajectory ===")
             if self.fluo_sensor:
                 print("  Fluorescence measurements enabled")
             else:

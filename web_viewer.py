@@ -23,60 +23,40 @@ SEG_PALETTE_HEX = [
     '#cedb9c', '#dcdcdc', '#ffed6f', '#56b4e9',
 ]
 
-# Health status colors mapping (pour affichage textuel)
-HEALTH_COLORS = {
-    "Critique": "#D32F2F",    # Rouge foncé
-    "Stressé": "#FF7043",     # Orange-rouge  
-    "Normal": "#FFA726",      # Orange
-    "Bon": "#66BB6A",         # Vert clair
-    "Excellent": "#2E7D32"    # Vert foncé
-}
+# ─────────────────────────────────────────────────────────────────────────────
+# Couleurs basées sur Fv/Fm — gradient noir → jaune
+# ─────────────────────────────────────────────────────────────────────────────
 
-def get_health_color(health_status):
-    """Retourne la couleur correspondant à l'état de santé (pour texte)"""
-    return HEALTH_COLORS.get(health_status, "#808080")  # Gris par défaut
-
-def normalize_fluorescence_values(leaves_data, visited_leaves):
-    """Normalise les valeurs de fluorescence entre 0 et 1"""
-    # Récupérer toutes les valeurs de fluorescence des feuilles visitées
-    fluor_values = []
+def normalize_fvfm(leaves_data, visited_leaves):
+    """
+    Normalisation min-max des valeurs Fv/Fm des feuilles visitées.
+    Retourne dict {leaf_id: valeur normalisée 0→1}.
+    Les feuilles sans fvfm ne sont pas incluses.
+    """
+    values = {}
     for leaf in leaves_data.get('leaves', []):
-        if leaf['id'] in visited_leaves and 'fluorescence_mean' in leaf:
-            fluor_values.append(leaf['fluorescence_mean'])
-    
-    if not fluor_values:
+        if leaf['id'] in visited_leaves and leaf.get('fvfm') is not None:
+            values[leaf['id']] = leaf['fvfm']
+
+    if not values:
         return {}
-    
-    # Calcul min/max pour normalisation
-    min_fluor = min(fluor_values)
-    max_fluor = max(fluor_values)
-    
-    # Eviter division par zéro
-    if max_fluor == min_fluor:
-        return {leaf['id']: 0.5 for leaf in leaves_data.get('leaves', []) if leaf['id'] in visited_leaves}
-    
-    # Normaliser chaque feuille
-    normalized = {}
-    for leaf in leaves_data.get('leaves', []):
-        if leaf['id'] in visited_leaves and 'fluorescence_mean' in leaf:
-            norm_value = (leaf['fluorescence_mean'] - min_fluor) / (max_fluor - min_fluor)
-            normalized[leaf['id']] = norm_value
-    
-    return normalized
 
-def fluorescence_to_color(normalized_value):
-    """Convertit valeur normalisée (0-1) en couleur RGB avec gradient rouge->vert"""
-    # Clamp entre 0 et 1
-    value = max(0, min(1, normalized_value))
-    
-    # Gradient rouge (0) vers vert (1)
-    # Rouge: (255, 0, 0) -> Vert: (0, 128, 0)
-    red = int(255 * (1 - value))      # 255 à 0
-    green = int(128 * value)          # 0 à 128  
-    blue = 0                          # Toujours 0
-    
-    # Convertir en hex
-    return f"#{red:02x}{green:02x}{blue:02x}"
+    vmin = min(values.values())
+    vmax = max(values.values())
+
+    if vmax == vmin:
+        return {lid: 0.5 for lid in values}
+
+    return {lid: (v - vmin) / (vmax - vmin) for lid, v in values.items()}
+
+
+def fvfm_to_color(normalized):
+    """Gradient noir (0) → jaune (1) : RGB (0,0,0) → (255,255,0)"""
+    t = max(0.0, min(1.0, normalized))
+    r = int(255 * t)
+    g = int(255 * t)
+    b = 0
+    return f'#{r:02x}{g:02x}{b:02x}'
 
 def find_latest_targeting_session():
     """Trouve le répertoire de session de targeting le plus récent"""
@@ -259,9 +239,10 @@ def load_pointcloud_with_targeting(session_dir, leaves_data, visited_leaves,
 
 def build_visits_figure(pc_x, pc_y, pc_z, leaves_data, visited_leaves):
     """
-    Mode 'Feuilles visitées' : fond noir + centroïdes colorés gradient fluorescence.
+    Mode 'Feuilles visitées' : fond noir + centroïdes gradient Fv/Fm noir→jaune.
+    Les feuilles sans mesure apparaissent en gris.
     """
-    normalized_values = normalize_fluorescence_values(leaves_data, visited_leaves)
+    normalized = normalize_fvfm(leaves_data, visited_leaves)
 
     traces = [go.Scatter3d(
         x=pc_x, y=pc_y, z=pc_z,
@@ -275,24 +256,31 @@ def build_visits_figure(pc_x, pc_y, pc_z, leaves_data, visited_leaves):
     for leaf in leaves_data.get('leaves', []):
         if leaf['id'] not in visited_leaves:
             continue
-        c   = leaf['centroid']
-        lid = leaf['id']
-        col = fluorescence_to_color(normalized_values[lid]) if lid in normalized_values else '#808080'
-        hs  = leaf.get('health_status', 'N/A')
+        c    = leaf['centroid']
+        lid  = leaf['id']
+        fvfm = leaf.get('fvfm')
+
+        if lid in normalized:
+            col   = fvfm_to_color(normalized[lid])
+            label = f'Fv/Fm={fvfm:.3f}' if fvfm is not None else 'Fv/Fm=N/A'
+        else:
+            col   = '#808080'
+            label = 'Fv/Fm=N/A'
+
         traces.append(go.Scatter3d(
             x=[c[0]], y=[c[1]], z=[c[2]],
             mode='markers',
             marker=dict(size=12, color=col, symbol='circle',
-                        line=dict(color='black', width=1)),
+                        line=dict(color='white', width=1)),
             name=f'Feuille {lid}',
-            hovertemplate=f'<b>Feuille N°{lid}</b><br>Santé: {hs}<extra></extra>',
+            hovertemplate=f'<b>Feuille N°{lid}</b><br>{label}<extra></extra>',
         ))
 
     fig = go.Figure(data=traces)
     fig.update_layout(
         scene=dict(aspectmode='data'),
         margin=dict(l=0, r=0, b=0, t=30),
-        title="Feuilles visitées — Gradient Rouge→Vert (santé)",
+        title="Feuilles visitées — Gradient Fv/Fm (noir→jaune)",
     )
     return fig
 
@@ -302,7 +290,7 @@ def get_leaf_info_for_display(leaves_data, visited_leaves):
         return {
             "leaf_id": "Aucune",
             "centroid": [0, 0, 0],
-            "health_status": "Unknown",
+            "fvfm": None,
             "analysis_date": "N/A"
         }
     
@@ -314,14 +302,15 @@ def get_leaf_info_for_display(leaves_data, visited_leaves):
             return {
                 "leaf_id": f"LEAF_{leaf['id']:03d}",
                 "centroid": leaf['centroid'],
-                "health_status": leaf.get('health_status', 'Unknown'),
-                "analysis_date": "2025-12-11"  # Date du jour par défaut
+                "fvfm": leaf.get('fvfm'),
+                "analysis_date": "2025-12-11"
             }
     
     return {
         "leaf_id": f"LEAF_{first_leaf_id:03d}",
         "centroid": [0, 0, 0],
-        "health_status": "Unknown", 
+        "fvfm": None,
+            
         "analysis_date": "2025-12-11"
     }
 
@@ -545,7 +534,7 @@ if targeting_data:
     leaf_info = {
         "leaf_id": "⌀",
         "centroid": "Aucune feuille sélectionnée",
-        "health_status": "N/A",
+        "fvfm": None,
         "analysis_date": "N/A"
     }
     leaf_image_src = None
@@ -564,7 +553,7 @@ else:
     leaf_info = {
         "leaf_id": "MOCK_001",
         "centroid": [0.2, 0.2, 0.2],
-        "health_status": "Healthy",
+        "fvfm": None,
         "analysis_date": "2025-12-11"
     }
     leaf_image_src = None
@@ -843,13 +832,14 @@ def get_leaf_info_by_id(leaf_id, leaves_data):
             return {
                 "leaf_id": f"LEAF_{leaf['id']:03d}",
                 "centroid": leaf['centroid'],
-                "health_status": leaf.get('health_status', 'Unknown'),
+                "fvfm": leaf.get('fvfm'),
                 "analysis_date": "2025-12-11"
             }
     return {
         "leaf_id": f"LEAF_{leaf_id:03d}",
         "centroid": [0, 0, 0],
-        "health_status": "Unknown", 
+        "fvfm": None,
+            
         "analysis_date": "2025-12-11"
     }
 
@@ -992,7 +982,7 @@ def update_leaf_info(click_data, session_signal):
     return [
         html.P(f"ID: {leaf_info['leaf_id']}", style={'margin': '5px 0', 'fontSize': '12px'}),
         html.P(f"Centroïde: {leaf_info['centroid']}", style={'margin': '5px 0', 'fontSize': '12px'}),
-        html.P(f"État: {leaf_info['health_status']}", style={'margin': '5px 0', 'fontSize': '12px'}),
+        html.P(f"Fv/Fm: {leaf_info['fvfm']:.4f}" if leaf_info.get('fvfm') is not None else "Fv/Fm: N/A", style={'margin': '5px 0', 'fontSize': '12px'}),
         html.P(f"Date: {leaf_info['analysis_date']}", style={'margin': '5px 0', 'fontSize': '12px'})
     ]
 
