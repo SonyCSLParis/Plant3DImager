@@ -1,0 +1,27 @@
+L'ajout de la méthode travel a nécéssité une modification du fichier suivant : 
+/home/romi/venv-romi/lib/python3.11/site-packages/romi/cnc.py
+
+git push dans ce repertoire ne changera jamais le fichier ci-dessus. C'est Peter qui doit push la nouvelle version dans romi-app. 
+
+CEPANDANT, romi-apps fonctionne maintenant avec RComWS et non plus RCom. Or le fichier cnc.py du robot fonctionne avec RCom
+La bonne chose à faire est donc la suivante : 
+ Passer le robot en RComWS (avec toute ce que ça implique comme modification dans le code dans les imports et l'usage des fonctions)
+ Refaire l'install de romi-apps pour avoir une version RComWS
+ Modifier le fichier cnc.py pour qu'il corresponde à RCOMWS
+
+Par ailleurs, ces modifications s'avereront bénéfique à long terme et éviterons des soucis de compatilibité et d'implémentations. 
+
+Note : Ces modifications ne sont pas si complexes. Un fichier Rcom2RComWS.txt résume tout ce qu'il faut faire pour switcher de l'un à l'autre (avec un agent IA ça devrait aller). Ceci dit, je recommande FORTEMENT de faire un backup complet (quitte à enregistrer une image de la raspberry en guise de backup et pas juste les fichiers) avant d'entreprendre ces modifications.  
+
+-- 
+
+Sync ne créé pas toujours un nouveau pointcloud. Parfois, quand les timestamps sont assez proches, il écrase l'ancien plutot que d'en recreer un autre. -> A regler
+
+--
+
+Le controle de la lumière n'est pas implémenté. Le fichier Relay_control fonctionne parfaitement, il faut juste l'integrer au workflow de sorte à ce que on eteigne les lumière au moment de la mesure de fluorescence (par exemple). 
+
+--
+
+
+
